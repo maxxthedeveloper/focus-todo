@@ -187,7 +187,7 @@
     return endOfDay;
   }
 
-   function formatTimeDifferenceDays(diffMillis) {
+  function formatTimeDifferenceDays(diffMillis) {
     const days = Math.max(0, Math.ceil(diffMillis / (1000 * 60 * 60 * 24))); // Round up days
     return `${days}d`;
   }
@@ -214,7 +214,24 @@
 
     return parts.join(' ');
   }
-  // --- End Date Helpers ---
+
+  // --- ADDED: Start of period helpers ---
+  function getStartOfQuarter(year, quarter) {
+    const startMonth = (quarter - 1) * 3; // Jan=0, Apr=3, Jul=6, Oct=9
+    return new Date(year, startMonth, 1, 0, 0, 0, 0); // First day, midnight
+  }
+
+  function getStartOfWeek() {
+    const now = new Date();
+    const dayOfWeek = now.getDay(); // 0=Sunday, 1=Monday, ... 6=Saturday
+    const daysSinceSunday = dayOfWeek; // Days since last Sunday (0 if today is Sunday)
+    const startOfWeek = new Date(now);
+    // Set date to last Sunday, time to midnight
+    startOfWeek.setDate(now.getDate() - daysSinceSunday);
+    startOfWeek.setHours(0, 0, 0, 0); // Midnight at the *start* of Sunday
+    return startOfWeek;
+  }
+  // --- END ADDED HELPERS ---
 
   // Get current year and quarter
   const currentYear = new Date().getFullYear();
@@ -249,9 +266,24 @@
   let focusMessageTimeout = null;
   let showTopFocusMessage = false; // State for the top message
   let topFocusMessageTimeout = null; // Timeout for the top message
+  let activeSectionTitle = null; // ADDED: Track focused section
+  let hoveredSectionTitle = null; // ADDED: Track hovered title
   let quarterCountdown = '';
   let weekCountdown = '';
   let dayCountdown = ''; 
+  let quarterPercent = 0; 
+  let weekPercent = 0;    
+  let dayPercent = 0;     // ADDED: State for day progress
+
+  // ---- SVG Progress Circle Calculations ----
+  const circleSize = 14; // Increased from 12
+  const strokeWidth = 2; 
+  $: radius = (circleSize - strokeWidth) / 2;
+  $: circumference = radius * 2 * Math.PI;
+  // Reactive calculations for the SVG dash offset based on percentages
+  $: quarterOffset = circumference - (quarterPercent / 100) * circumference;
+  $: weekOffset = circumference - (weekPercent / 100) * circumference;
+  // ---- End SVG Calculations ----
 
   // Function to convert hex to rgba
   function hexToRgba(hex, alpha = 0.2) { // Default alpha 20%
@@ -304,27 +336,26 @@
 
   // Function to handle clicks within any editor (for checkbox color change)
   function handleEditorClick(event) {
-    // Check if the clicked element is a checkbox
     if (event.target.matches('.todo-checkbox')) {
       const checkbox = event.target;
-      const isChecked = checkbox.checked; // Check the current state AFTER the click
-
-      // Find the parent editor area to get the section title
+      const isChecked = checkbox.checked;
       const editorArea = checkbox.closest('.editor-area');
-      if (editorArea) {
-        const sectionTitle = editorArea.dataset.title;
+      const lineDiv = checkbox.closest('div'); // Target the line div
 
-        // Existing theme color change logic
-        let newColor;
-        do {
-          newColor = themeColors[Math.floor(Math.random() * themeColors.length)];
-        } while (newColor === $themeColor && themeColors.length > 1); // Use $themeColor here
-        
+      if (lineDiv && editorArea && editorArea.contains(lineDiv)) { 
+        lineDiv.classList.toggle('is-completed', isChecked);
+        console.log('Toggled is-completed on line div:', lineDiv);
+      } else {
+        console.warn('Could not find suitable line div element for completed style');
+      }
+
+      // Theme color change logic (no change needed here)
+      if (editorArea) {
         // Update the themeColor store
-        themeColor.set(newColor); // Use .set for direct update
+        themeColor.set(themeColors[Math.floor(Math.random() * themeColors.length)]); // Use .set for direct update
         
         // Update selection style *with the new color*
-        updateSelectionStyle(newColor); 
+        updateSelectionStyle(themeColor.get());
       }
     }
   }
@@ -407,82 +438,67 @@
     const selection = window.getSelection();
     const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
 
-    // Check if the input likely resulted in "[]" just before the caret
     if (range && range.collapsed) {
         const node = range.startContainer;
         const offset = range.startOffset;
 
-        // Ensure we are in a text node and there's enough text before the caret
-        if (node.nodeType === Node.TEXT_NODE && offset >= 2) {
-            if (node.textContent.substring(offset - 2, offset) === '[]') {
-                
-                // --- MODIFIED CHECK: Use upward traversal --- 
-                const alreadyHasCheckbox = lineAlreadyHasCheckbox(node, editor);
-                console.log("Checking for [] input. Node:", node, "Already has checkbox in line?", alreadyHasCheckbox);
-
-                if (!alreadyHasCheckbox) { // Use the new check result
-                    // Prevent default insertion of '[]' and our own replacement logic
-                    event.preventDefault(); 
-
-                    // Create the checkbox element
-                    const checkbox = document.createElement('input');
-                    checkbox.type = 'checkbox';
-                    checkbox.className = 'todo-checkbox';
-                    checkbox.contentEditable = 'false'; // Prevent editing the checkbox itself
-
-                    // Create a non-breaking space node to go after the checkbox
-                    const spaceNode = document.createTextNode('\u00A0'); // &nbsp;
-
-                    // --- Refined Range manipulation --- 
-                    // 1. Remember the exact start position *before* deleting '[]'
-                    //    Need container and offset from the original range where '[]' was detected
-                    const insertContainer = range.startContainer; 
-                    const insertOffset = range.startOffset - 2; // Position before '['
-
-                    // 2. Delete the "[]" text using the original text node and offset
-                    const deleteRange = document.createRange();
-                    deleteRange.setStart(node, offset - 2); // node is the text node where '[]' was found
-                    deleteRange.setEnd(node, offset);       // offset is position after ']'
-                    deleteRange.deleteContents();
-
-                    // 3. Insert checkbox + space *at the deletion point*
-                    //    Use the remembered container and offset.
-                    const insertRange = document.createRange();
-                    insertRange.setStart(insertContainer, insertOffset); 
-                    insertRange.collapse(true);
-
-                    // Insert space first, then checkbox (DOM order becomes checkbox, space)
-                    insertRange.insertNode(spaceNode);
-                    insertRange.insertNode(checkbox);
-
-                    // 4. Set the caret position *after* the inserted space node
-                    selection.removeAllRanges(); // Clear previous selection
-                    const finalRange = document.createRange();
-                    finalRange.setStartAfter(spaceNode);
-                    finalRange.collapse(true);
-                    selection.addRange(finalRange);   // Set the new cursor position
-                    // --- End Refined Range manipulation ---
-                    
-                    // Trigger store update manually as we prevented default input event's update
-                    // Use timeout for safety after DOM manipulation
-                    setTimeout(() => {
-                        const currentContentHTML = editor.innerHTML;
-                        const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
-                        notes.update(currentNotes =>
-                            currentNotes.map(note =>
-                                note.title === sectionTitle ? { ...note, content: contentToSave } : note
-                            )
-                        );
-                        checkAndUpdateTheme($notes); // Also check theme
-                    }, 0);
-
-                } else {
-                    // Block already has a checkbox, or no block found - do nothing special.
-                    // Allow default behavior (typing '[]'). The store update will happen below naturally.
-                    console.log("Block already has checkbox or not found. Allowing default '[]' typing.");
-                }
-                // --- MODIFIED END --- 
+        if (node.nodeType === Node.TEXT_NODE && offset >= 2 && node.textContent.substring(offset - 2, offset) === '[]') {
+            // --- Simplified Start Check --- 
+            let isAtStart = false;
+            const parentElement = node.parentNode;
+            if (parentElement) {
+              if (offset === 2) { // '[]' are the only things in this text node
+                  // Check if node is first child or only preceded by BR
+                  let sibling = node.previousSibling;
+                  let onlyBrBefore = true;
+                  while (sibling) {
+                      if (sibling.nodeName !== 'BR') {
+                          onlyBrBefore = false;
+                          break;
+                      }
+                      sibling = sibling.previousSibling;
+                  }
+                  if(onlyBrBefore) {
+                    isAtStart = true;
+                  }
+              }
             }
+            console.log('[] typed. Is at start?', isAtStart);
+            // --- End Simplified Start Check ---
+
+            if (isAtStart) { 
+                event.preventDefault(); 
+                // ... (Checkbox creation logic remains largely the same: delete [], insert checkbox+space, set cursor) ...
+                // Re-paste the refined insertion logic here
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.className = 'todo-checkbox';
+                checkbox.contentEditable = 'false';
+                const spaceNode = document.createTextNode('\u00A0');
+                const insertContainer = range.startContainer; 
+                const insertOffset = range.startOffset - 2; 
+                const deleteRange = document.createRange();
+                deleteRange.setStart(node, offset - 2);
+                deleteRange.setEnd(node, offset);
+                deleteRange.deleteContents();
+                const insertRange = document.createRange();
+                insertRange.setStart(insertContainer, insertOffset); 
+                insertRange.collapse(true);
+                insertRange.insertNode(spaceNode);
+                insertRange.insertNode(checkbox);
+                selection.removeAllRanges();
+                const finalRange = document.createRange();
+                finalRange.setStartAfter(spaceNode);
+                finalRange.collapse(true);
+                selection.addRange(finalRange);
+                
+                setTimeout(() => { // Update store
+                    const currentContentHTML = editor.innerHTML;
+                    const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
+                    notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: contentToSave } : note));
+                    checkAndUpdateTheme($notes);
+                }, 0);
+            } // else: Do nothing, allow '[]' to be typed normally
         }
     }
 
@@ -546,68 +562,59 @@
       console.log('Enter key pressed');
       const range = selection.getRangeAt(0);
       const container = range.startContainer;
-      console.log('Enter press container:', container); // Keep log for now
+      console.log('Enter press container:', container); 
 
-      // --- SIMPLIFIED CHECK: Look at immediate parent or container --- 
-      let isOnTodoLine = false;
-      if (container.nodeType === Node.TEXT_NODE && container.parentNode) {
-          // Cursor is in a text node, check its direct parent element
-          isOnTodoLine = container.parentNode.querySelector('.todo-checkbox') !== null;
-          console.log('Enter check: Text node parent check:', container.parentNode, isOnTodoLine);
-      } else if (container.nodeType === Node.ELEMENT_NODE) {
-          // Cursor container is an element, check it directly
-          isOnTodoLine = container.querySelector('.todo-checkbox') !== null;
-          // Also check if the element itself *is* the editor (should not be treated as todo line)
-          if (container === editor) {
-              isOnTodoLine = false; 
-          }
-          console.log('Enter check: Element container check:', container, isOnTodoLine);
+      // --- Attempt 3: Simplified Line Element Finding --- 
+      let lineElement = null;
+      if (container.nodeType === Node.TEXT_NODE) {
+          lineElement = container.parentNode; // Assume parent is the line
+      } else if (container.nodeType === Node.ELEMENT_NODE && container !== editor) {
+          lineElement = container.parentNode; // Assume parent is the line 
       }
-      // --- End simplified check ---
+      // If the found parent is the editor itself, it's not a valid line element
+      if (lineElement === editor) {
+        lineElement = null;
+      }
+      
+      const isOnTodoLine = lineElement && lineElement.querySelector('.todo-checkbox') !== null;
+      console.log('[Attempt 3] Enter check: Line Element:', lineElement, 'Is todo?', isOnTodoLine);
+      // --- End Attempt 3 ---
 
-      // Use the revised 'isOnTodoLine' condition
       if (isOnTodoLine) {
-          // --- Checkbox Line Enter Logic --- 
-          event.preventDefault(); // Prevent default ONLY for checkbox lines
-          console.log('Condition met: Inserting new checkbox...');
-          // Create elements first
-          const br = document.createElement('br');
+          event.preventDefault();
+          console.log('Condition met: Inserting new checkbox line...');
+          
+          // Create new div element for the next line
+          const newDiv = document.createElement('div');
           const checkbox = document.createElement('input');
           checkbox.type = 'checkbox';
           checkbox.className = 'todo-checkbox';
           checkbox.contentEditable = 'false';
-          const spaceNode = document.createTextNode('\u00A0'); // &nbsp;
+          const spaceNode = document.createTextNode('\u00A0');
+          
+          // Add checkbox and space to the new div
+          newDiv.appendChild(checkbox);
+          newDiv.appendChild(spaceNode);
 
-          // Insert elements sequentially, adjusting range each time
-          range.insertNode(br);
-          range.setStartAfter(br);
-          range.collapse(true);
-
-          range.insertNode(checkbox);
-          range.setStartAfter(checkbox);
-          range.collapse(true);
-
-          range.insertNode(spaceNode);
-
-          // Set final cursor position explicitly after the last node
-          const finalRange = document.createRange();
-          finalRange.setStartAfter(spaceNode);
-          finalRange.collapse(true);
-
+          // Insert the new div after the current range position
+          // We need to place the cursor correctly *within* the original editor
+          range.collapse(false); // Collapse range to its end point
+          range.insertNode(newDiv); // Insert the new div
+          
+          // Place cursor after the space in the *new* div
+          const newRange = document.createRange();
+          newRange.setStartAfter(spaceNode); // spaceNode is inside newDiv
+          newRange.collapse(true);
           selection.removeAllRanges();
-          selection.addRange(finalRange);
+          selection.addRange(newRange);
 
-          // --- End Focus Message Logic ---
+          // Focus message and store update logic (copied from previous Enter logic)
           setTimeout(() => {
              const sectionTitle = editor.dataset.title;
              const currentContentHTML = editor.innerHTML;
              // Check if content is just <br> tags or whitespace
              const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
-             notes.update(currentNotes =>
-                 currentNotes.map(note =>
-                     note.title === sectionTitle ? { ...note, content: contentToSave } : note
-                 )
-             );
+             notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: contentToSave } : note));
              // Count checkboxes in the *current* section after adding one
              const tempDiv = document.createElement('div');
              tempDiv.innerHTML = currentContentHTML; // Use content just added
@@ -633,21 +640,16 @@
                  }, 4000); // Hide after 4 seconds
              }
          }, 0);
-         // --- End Checkbox Line Enter Logic --- 
       } else {
-          // --- Normal Enter Logic --- 
-          console.log('Condition NOT met: Allowing default browser Enter behavior...');
-          // No event.preventDefault() here.
-          // The browser will insert <br> or wrap in <div>/</div> etc.
-          // The subsequent 'input' event will trigger handleInput, which updates the store.
-          handleTypingState(); // Still indicate typing is happening
-          // --- End Normal Enter Logic ---
+          // Allow default Enter
+          // ...
       }
     } else if (event.key === 'Backspace') {
+      // --- Simplified Backspace Logic --- 
       console.log("--- Backspace Keydown Start ---");
       const selection = window.getSelection();
-      if (!selection || selection.rangeCount === 0) {
-          console.log("Backspace: No selection or range count is 0");
+      if (!selection || !selection.isCollapsed || selection.rangeCount === 0) {
+          console.log("Backspace: No collapsed selection or range count is 0");
           return;
       }
 
@@ -655,155 +657,91 @@
       const container = range.startContainer; 
       const offset = range.startOffset;      
       const editor = event.target;
-      console.log(`Backspace Context: Container Node=`, container);
-      console.log(`Backspace Context: Container Type=`, container.nodeType);
-      console.log(`Backspace Context: Container Name=`, container.nodeName);
-      console.log(`Backspace Context: Offset=`, offset);
+      console.log(`Backspace Context: Container=${container.nodeName}, Offset=${offset}`);
 
-      if (!selection.isCollapsed) { 
-        console.log("Backspace on selection - allowing default");
-        handleTypingState(); 
-        return;
-      }
-      
-      // --- ADDED: Specific check for cursor AFTER the space node --- 
-      if (container.nodeType === Node.TEXT_NODE && container.textContent === '\u00A0' && offset >= 1) { // Offset 1 or 2, depending on browser
-          console.log("Backspace Check: Cursor is at the end of the space node.");
+      let handled = false;
+
+      // CASE 1: Cursor is immediately after the &nbsp; following a checkbox
+      if (container.nodeType === Node.TEXT_NODE && container.textContent === '\u00A0' && offset >= 1) {
           const checkboxToRemove = container.previousSibling;
           if (checkboxToRemove && checkboxToRemove.nodeType === Node.ELEMENT_NODE && checkboxToRemove.classList.contains('todo-checkbox')) {
-              console.log("HANDLING VIA NEW CHECK: Backspace deleting space node and preceding checkbox.");
+              console.log("HANDLING (Backspace Case 1): Deleting space and checkbox.");
               event.preventDefault();
-
-              // Check and remove preceding BR (copied from Case 1)
-              const brToRemove = checkboxToRemove.previousSibling;
-              if (brToRemove && brToRemove.nodeName === 'BR') {
-                  console.log("HANDLING: Also removing preceding BR tag.");
-                  brToRemove.remove();
-              }
-
-              // Remove checkbox and space node
+              const lineDiv = checkboxToRemove.closest('div'); 
               checkboxToRemove.remove();
-              container.remove(); // Remove the space node itself
-
-              // Update store & theme
-              setTimeout(() => {
-                  const sectionTitle = editor.dataset.title;
-                  const currentContentHTML = editor.innerHTML;
-                  const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
-                  notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: contentToSave } : note));
-                  checkAndUpdateTheme($notes);
-              }, 0);
-              return; // Handled
+              container.remove(); // Remove the space node
+              console.log(`[Backspace Case 1] lineDiv innerHTML before remove check: '${lineDiv?.innerHTML}'`);
+              console.log(`[Backspace Case 1] Is effectively empty?`, lineDiv && isEffectivelyEmpty(lineDiv.innerHTML));
+              if(lineDiv && isEffectivelyEmpty(lineDiv.innerHTML)) { 
+                console.log("[Backspace Case 1] Removing empty lineDiv:", lineDiv);
+                lineDiv.remove();
+              }
+              handled = true;
           }
       }
-      // --- END ADDED CHECK ---
 
-      // Get the node immediately before the logical cursor position within the container
+      // CASE 2: Node directly before cursor is the checkbox itself
       const nodeBefore = offset > 0 ? container.childNodes[offset - 1] : null;
-      console.log(`Backspace Check: nodeBefore=`, nodeBefore); 
-      if(nodeBefore) {
-        console.log(`Backspace Check: nodeBefore Type=`, nodeBefore.nodeType);
-        console.log(`Backspace Check: nodeBefore Name=`, nodeBefore.nodeName);
-        console.log(`Backspace Check: nodeBefore Text=`, nodeBefore.textContent);
+      if (!handled && nodeBefore && nodeBefore.nodeType === Node.ELEMENT_NODE && nodeBefore.classList.contains('todo-checkbox')) {
+          console.log("HANDLING (Backspace Case 2): Deleting checkbox.");
+          event.preventDefault();
+          const spaceNodeToRemove = nodeBefore.nextSibling;
+          const lineDiv = nodeBefore.closest('div'); 
+          nodeBefore.remove(); // Remove checkbox
+          if (spaceNodeToRemove && spaceNodeToRemove.nodeType === Node.TEXT_NODE && spaceNodeToRemove.textContent === '\u00A0') {
+              spaceNodeToRemove.remove();
+          }
+          console.log(`[Backspace Case 2] lineDiv innerHTML before remove check: '${lineDiv?.innerHTML}'`);
+          console.log(`[Backspace Case 2] Is effectively empty?`, lineDiv && isEffectivelyEmpty(lineDiv.innerHTML));
+           if(lineDiv && isEffectivelyEmpty(lineDiv.innerHTML)) { 
+              console.log("[Backspace Case 2] Removing empty lineDiv:", lineDiv);
+              lineDiv.remove();
+            }
+          handled = true;
+      }
+      
+      // CASE 3: Cursor is at the beginning of a line (div), and the previous line was a todo
+      if (!handled && offset === 0 && container.nodeType === Node.ELEMENT_NODE && container.nodeName === 'DIV') {
+          const previousLineDiv = container.previousElementSibling;
+          if (previousLineDiv && previousLineDiv.nodeName === 'DIV') {
+            const lastChild = previousLineDiv.lastChild;
+            // Check if previous line ends with checkbox + space
+            if (lastChild && lastChild.nodeType === Node.TEXT_NODE && lastChild.textContent === '\u00A0') {
+                const checkboxToRemove = lastChild.previousSibling;
+                if (checkboxToRemove && checkboxToRemove.nodeType === Node.ELEMENT_NODE && checkboxToRemove.classList.contains('todo-checkbox')) {
+                    console.log("HANDLING (Backspace Case 3): Deleting previous line's checkbox and space.");
+                    event.preventDefault();
+                    checkboxToRemove.remove();
+                    lastChild.remove(); // Remove space
+                    console.log(`[Backspace Case 3] previousLineDiv innerHTML before remove check: '${previousLineDiv?.innerHTML}'`);
+                    console.log(`[Backspace Case 3] Is effectively empty?`, previousLineDiv && isEffectivelyEmpty(previousLineDiv.innerHTML));
+                    if (previousLineDiv && isEffectivelyEmpty(previousLineDiv.innerHTML)) {
+                         console.log("[Backspace Case 3] Removing empty previousLineDiv:", previousLineDiv);
+                         previousLineDiv.remove(); 
+                    }
+                    handled = true;
+                }
+            }
+          }
       }
 
-      if (nodeBefore) {
-        // === CASE 1: Node before cursor is the &nbsp; text node ===
-        console.log("Backspace Check: Evaluating Case 1 (Space Node Check)");
-        if (nodeBefore.nodeType === Node.TEXT_NODE && nodeBefore.textContent === '\u00A0') {
-          console.log("Backspace Check: Case 1 Condition Met (Node is Space)");
-          const checkboxToRemove = nodeBefore.previousSibling;
-          console.log(`Space Node Check: Node before space=`, checkboxToRemove);
-          if (checkboxToRemove && checkboxToRemove.nodeType === Node.ELEMENT_NODE && checkboxToRemove.classList.contains('todo-checkbox')) {
-            console.log("HANDLING VIA CASE 1: Backspace deleting space node after checkbox.");
-            event.preventDefault();
-
-            // Check and remove preceding BR
-            const brToRemove = checkboxToRemove.previousSibling;
-            if (brToRemove && brToRemove.nodeName === 'BR') {
-              console.log("HANDLING: Also removing preceding BR tag.");
-              brToRemove.remove();
-            }
-
-            // Remove checkbox and space node
-            checkboxToRemove.remove();
-            nodeBefore.remove(); // Remove the space node
-
-            // Update store & theme
-            setTimeout(() => {
-                const sectionTitle = editor.dataset.title;
-                const currentContentHTML = editor.innerHTML;
-                 // Check if content is just <br> tags or whitespace
-                const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
-                notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: contentToSave } : note));
-                checkAndUpdateTheme($notes);
-            }, 0);
-            return; // Handled
-          }
-        }
-
-        // === CASE 2: Node before cursor is the checkbox element itself ===
-        console.log("Backspace Check: Evaluating Case 2 (Checkbox Node Check)");
-        if (nodeBefore.nodeType === Node.ELEMENT_NODE && nodeBefore.classList.contains('todo-checkbox')) {
-          console.log("Backspace Check: Case 2 Condition Met (Node is Checkbox)");
-          event.preventDefault();
-          console.log("HANDLING VIA CASE 2: Backspace deleting checkbox element directly.");
-          const checkboxToRemove = nodeBefore;
-
-          // Check and remove following space node
-          const spaceNodeToRemove = checkboxToRemove.nextSibling;
-          if (spaceNodeToRemove && spaceNodeToRemove.nodeType === Node.TEXT_NODE && spaceNodeToRemove.textContent === '\u00A0') {
-             console.log("HANDLING: Also removing following space node.");
-             spaceNodeToRemove.remove();
-          }
-
-          // Remove checkbox
-          checkboxToRemove.remove();
-
-          // Update store & theme
+      if (handled) {
+          // Update store if we modified content
           setTimeout(() => {
               const sectionTitle = editor.dataset.title;
               const currentContentHTML = editor.innerHTML;
-               // Check if content is just <br> tags or whitespace
               const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
               notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: contentToSave } : note));
               checkAndUpdateTheme($notes);
           }, 0);
-          return; // Handled
-        }
+      } else {
+          // Allow default backspace if not handled
+          console.log("ALLOWING DEFAULT: Backspace - No specific handling triggered.");
+          handleTypingState();
       }
-
-      // --- Specific check for Backspace at the very beginning --- 
-      console.log("Backspace Check: Evaluating Case 3 (Empty Editor Start Check)");
-      // Check if cursor is at offset 0 within the main editor element itself
-      if (offset === 0 && container === editor) {
-        // Check if the editor is effectively empty (contains nothing or just a single <br>)
-        const currentHTML = editor.innerHTML.trim();
-        if (isEffectivelyEmpty(currentHTML)) { // Use helper function here too
-          console.log("HANDLING: Backspace pressed at start of effectively empty editor.");
-          event.preventDefault(); // Prevent default backspace
-          if (editor.innerHTML !== '') { // Avoid unnecessary DOM update if already empty
-            editor.innerHTML = ''; // Ensure it's truly empty
-            // Update store immediately since we changed content
-            setTimeout(() => {
-              const sectionTitle = editor.dataset.title;
-              // Ensure we save an empty string
-              notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: '' } : note));
-              checkAndUpdateTheme($notes); // Check theme in case removing last item affects it
-            }, 0);
-          }
-          return; // Handled
-        }
-      }
-      // --- End specific check ---
-
-      // --- If neither case handled it, allow default --- 
-      console.log("ALLOWING DEFAULT: Backspace - No specific handling triggered.");
-      handleTypingState();
       console.log("--- Backspace Keydown End ---");
-
+      // --- End Simplified Backspace Logic --- 
     } else {
-        // Handle typing state for other keys
         handleTypingState();
     }
   }
@@ -811,9 +749,16 @@
 
   // Svelte action to initialize the contenteditable element and handle updates safely
   function initContent(node, initialContent) {
-    // Set the initial content directly on first run, ensuring empty string clears innerHTML
     node.innerHTML = initialContent;
-
+    tick().then(() => {
+      const checkboxes = node.querySelectorAll('.todo-checkbox');
+      checkboxes.forEach(cb => {
+        const lineDiv = cb.closest('div'); // Target the line div
+        if (lineDiv && node.contains(lineDiv)) {
+           lineDiv.classList.toggle('is-completed', cb.checked);
+        }
+      });
+    });
     return {
       update(newContent) {
         // Only update the innerHTML if the element is NOT focused
@@ -844,41 +789,58 @@
   onMount(() => {
     if (!isBrowser) return; // Guard against server-side execution
     
-    // --- Initial Countdown Calculation (Content rendering handled by template) ---
-    function initializeCountdowns() {
-      // Calculate initial countdowns
-      const now = new Date().getTime(); // Current time in milliseconds
+    // --- Initial Countdown & Percentage Calculation ---
+    function initializeTimers() {
+      // Calculate initial countdowns & percentages
+      const nowMillis = new Date().getTime(); // Current time in milliseconds
 
       // Quarter
+      const startOfQuarterMillis = getStartOfQuarter(currentYear, currentQuarterNumber).getTime();
       const endOfQuarterMillis = getEndOfQuarter(currentYear, currentQuarterNumber);
-      quarterCountdown = formatTimeDifferenceDays(endOfQuarterMillis - now);
+      const totalQuarterMillis = endOfQuarterMillis - startOfQuarterMillis;
+      const elapsedQuarterMillis = nowMillis - startOfQuarterMillis;
+      quarterCountdown = formatTimeDifferenceDays(endOfQuarterMillis - nowMillis);
+      quarterPercent = Math.max(0, Math.min(100, (elapsedQuarterMillis / totalQuarterMillis) * 100));
 
       // Week
+      const startOfWeekMillis = getStartOfWeek().getTime();
       const endOfWeekMillis = getEndOfWeek().getTime();
-      weekCountdown = formatTimeDifferenceDays(endOfWeekMillis - now);
+      const totalWeekMillis = endOfWeekMillis - startOfWeekMillis;
+      const elapsedWeekMillis = nowMillis - startOfWeekMillis;
+      weekCountdown = formatTimeDifferenceDays(endOfWeekMillis - nowMillis);
+      weekPercent = Math.max(0, Math.min(100, (elapsedWeekMillis / totalWeekMillis) * 100));
 
-      // Day - Use new HMS formatter
+      // Day
+      const startOfDayMillis = new Date(); // Get current date object
+      startOfDayMillis.setHours(0, 0, 0, 0); // Set time to midnight (start of day)
       const endOfDayMillis = getEndOfDay().getTime();
-      dayCountdown = formatTimeDifferenceHMS(endOfDayMillis - now); // Use HMS format
+      const totalDayMillis = endOfDayMillis - startOfDayMillis.getTime();
+      const elapsedDayMillis = nowMillis - startOfDayMillis.getTime();
+      dayCountdown = formatTimeDifferenceHMS(endOfDayMillis - nowMillis); // Keep HMS format for text
+      dayPercent = Math.max(0, Math.min(100, (elapsedDayMillis / totalDayMillis) * 100));
     }
 
-    // Initial call for countdowns
-    initializeCountdowns();
+    // Initial call
+    initializeTimers();
 
     // Interval to update countdowns frequently
     const countdownUpdateInterval = setInterval(() => {
-      const now = new Date().getTime();
+      const nowMillis = new Date().getTime();
+      // Day percentage needs frequent updates too
+      const startOfDayMillis = new Date();
+      startOfDayMillis.setHours(0, 0, 0, 0);
       const endOfDayMillis = getEndOfDay().getTime();
-      dayCountdown = formatTimeDifferenceHMS(endOfDayMillis - now); // Only update day frequently
+      const totalDayMillis = endOfDayMillis - startOfDayMillis.getTime();
+      const elapsedDayMillis = nowMillis - startOfDayMillis.getTime();
+      dayCountdown = formatTimeDifferenceHMS(endOfDayMillis - nowMillis);
+      dayPercent = Math.max(0, Math.min(100, (elapsedDayMillis / totalDayMillis) * 100));
     }, 1000); // Update every second
 
     // Interval to update week/quarter less frequently (e.g., every minute)
     const longerInterval = setInterval(() => {
-      const now = new Date().getTime();
-      const endOfQuarterMillis = getEndOfQuarter(currentYear, currentQuarterNumber);
-      quarterCountdown = formatTimeDifferenceDays(endOfQuarterMillis - now);
-      const endOfWeekMillis = getEndOfWeek().getTime();
-      weekCountdown = formatTimeDifferenceDays(endOfWeekMillis - now);
+      // Recalculate everything including percentages
+      // This already calls initializeTimers which includes Quarter and Week
+      initializeTimers(); 
     }, 60000); // Update every minute
 
     // --- Quarter Change Check ---
@@ -905,7 +867,7 @@
             )
           );
           // Recalculate countdowns
-          initializeCountdowns(); // Re-init countdowns only
+          initializeTimers(); // Re-init countdowns only
         }
       } else {
         console.warn("Could not find the Quarter note object in the store to check for updates.");
@@ -925,10 +887,38 @@
       }
     };
   });
+
+  // --- ADDED: Focus/Blur Handlers ---
+  function handleFocus(event) {
+      if (event.target.matches('.editor-area')) {
+          activeSectionTitle = event.target.dataset.title;
+          console.log('Focus in section:', activeSectionTitle);
+      }
+  }
+
+  function handleBlur(event) {
+      // Check if focus moved *outside* all editor areas
+      // relatedTarget shows where focus went. If it's null or not an editor, clear active title.
+      if (!event.relatedTarget || !event.relatedTarget.matches('.editor-area')) {
+          activeSectionTitle = null;
+          console.log('Focus left all sections');
+      }
+      // If focus moved to *another* editor, handleFocus on that one will update the title.
+  }
+  // --- END: Focus/Blur Handlers ---
+
+  // --- ADDED: Title Hover Handlers ---
+  function handleTitleMouseEnter(title) {
+    hoveredSectionTitle = title;
+  }
+  function handleTitleMouseLeave() {
+    hoveredSectionTitle = null;
+  }
+  // --- END: Title Hover Handlers ---
 </script>
 
 <main 
-  class="flex flex-col items-center justify-center min-h-screen w-full pt-8 pb-16 space-y-2"
+  class="flex flex-col items-center justify-center min-h-screen w-full pt-8 pb-16 space-y-0"
   style={mainStyle}
 >
   <!-- Top Focus Message Indicator -->
@@ -950,20 +940,37 @@
     <!-- Section -->
     <section class="w-full max-w-lg px-4">
       <!-- Section Title Row -->
-      <h2 class="text-xl font-medium text-black/80 mb-3 flex items-center space-x-2">
+      <h2 
+        class="text-xl font-medium text-black/80 mb-3 flex items-center space-x-2"
+        on:mouseenter={() => handleTitleMouseEnter(note.title)}
+        on:mouseleave={handleTitleMouseLeave}
+      >
         <span>{note.title}</span>
         <!-- Countdown Pill -->
         {#if /^Q\d$/.test(note.title)}
-          <span class="countdown-pill">
-              {quarterCountdown}
+          <span class="countdown-pill" class:active={activeSectionTitle === note.title || hoveredSectionTitle === note.title}>
+            <svg class="progress-circle" width={circleSize} height={circleSize} viewBox={`0 0 ${circleSize} ${circleSize}`}>
+              <circle class="progress-background" stroke-width={strokeWidth} fill="transparent" r={radius} cx={circleSize / 2} cy={circleSize / 2}/>
+              <circle class="progress-foreground" stroke-width={strokeWidth} stroke-dasharray={circumference} stroke-dashoffset={quarterOffset} fill="transparent" r={radius} cx={circleSize / 2} cy={circleSize / 2}/>
+            </svg>
+            <span class="countdown-text">{quarterCountdown}</span>
           </span>
         {:else if note.title === 'This week'}
-            <span class="countdown-pill">
-              {weekCountdown}
+            <span class="countdown-pill" class:active={activeSectionTitle === note.title || hoveredSectionTitle === note.title}>
+              <svg class="progress-circle" width={circleSize} height={circleSize} viewBox={`0 0 ${circleSize} ${circleSize}`}>
+                <circle class="progress-background" stroke-width={strokeWidth} fill="transparent" r={radius} cx={circleSize / 2} cy={circleSize / 2}/>
+                <circle class="progress-foreground" stroke-width={strokeWidth} stroke-dasharray={circumference} stroke-dashoffset={weekOffset} fill="transparent" r={radius} cx={circleSize / 2} cy={circleSize / 2}/>
+              </svg>
+              <span class="countdown-text">{weekCountdown}</span>
           </span>
         {:else if note.title === 'Today'}
-           <span class="countdown-pill today-countdown">
-              {dayCountdown}
+           <span class="countdown-pill" class:active={activeSectionTitle === note.title || hoveredSectionTitle === note.title}>
+              <!-- Inlined SVG Progress Circle -->
+              <svg class="progress-circle" width={circleSize} height={circleSize} viewBox={`0 0 ${circleSize} ${circleSize}`}>
+                <circle class="progress-background" stroke-width={strokeWidth} fill="transparent" r={radius} cx={circleSize / 2} cy={circleSize / 2}/>
+                <circle class="progress-foreground" stroke-width={strokeWidth} stroke-dasharray={circumference} stroke-dashoffset={circumference - (dayPercent / 100) * circumference} fill="transparent" r={radius} cx={circleSize / 2} cy={circleSize / 2}/>
+              </svg>
+              <span class="countdown-text">{dayCountdown}</span>
           </span>
         {/if}
       </h2>
@@ -985,6 +992,8 @@
         on:input={handleInput} 
         on:keydown={handleKeydown}
         on:click={handleEditorClick}
+        on:focus={handleFocus}
+        on:blur={handleBlur}
       ></div>
     </section>
   {/each}
@@ -1058,30 +1067,34 @@
 
   /* Countdown Pill Styles */
   .countdown-pill {
-    @apply text-xs font-medium px-2 py-0.5 rounded-full inline-block;
-    background-color: rgba(0, 0, 0, 0.06); /* Changed from 8% to 6% black */
-    color: rgba(0, 0, 0, 0.32); /* Changed from 24% to 32% black */
-    white-space: nowrap; /* Prevent wrapping */
-    transition: color 0.3s ease, background-color 0.3s ease;
+    @apply text-xs font-medium rounded-full inline-flex items-center space-x-1;
+    padding-top: 0.35rem;    /* Match left padding */
+    padding-bottom: 0.35rem; /* Match left padding */
+    padding-left: 0.35rem;   
+    padding-right: 0.4rem;     
+    background-color: transparent; /* Default background transparent */
+    /* Default text color (when faded out) - might not be visible but set it */
+    color: rgba(0, 0, 0, 0.56); 
+    white-space: nowrap;
+    /* Combined transition for background and text color/opacity */
+    transition: background-color 0.3s ease, color 0.3s ease, opacity 0.3s ease; /* Added opacity transition */
   }
 
-  /* Specific class for the Today countdown animation & fixed width */
-  .today-countdown {
-      animation: pulse 2s infinite ease-in-out;
-      min-width: 5em; /* Use min-width */
-      text-align: center;
-      padding-left: 0.5rem;
-      padding-right: 0.5rem;
+  /* Style when section is active */
+  .countdown-pill.active {
+      background-color: rgba(0, 0, 0, 0.06); /* Visible background */
   }
 
-  /* Subtle Pulse animation for Today countdown */
-  @keyframes pulse {
-    0%, 100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.7;
-    }
+  .countdown-text { 
+    line-height: 1;
+    opacity: 0; /* Default text invisible */
+    transition: opacity 0.3s ease; /* Transition for text visibility */
+  }
+
+  /* Style for text when section is active */
+  .countdown-pill.active .countdown-text {
+      opacity: 1; /* Visible text */
+      color: rgba(0, 0, 0, 0.56); /* Set active text color to 56% black */
   }
 
   /* Custom styles for the To-Do Checkbox */
@@ -1154,4 +1167,41 @@
     }
   }
   /* === MOVED CELEBRATION STYLES END === */
+
+  /* === Progress Circle Styles === */
+  .progress-circle {
+    display: inline-block;
+    vertical-align: middle;
+    transform: rotate(-90deg); /* Start the progress from the top */
+  }
+
+  .progress-background {
+    stroke: rgba(0, 0, 0, 0.12); /* Black 12% */
+    opacity: 1; /* Opacity handled by stroke color */
+  }
+
+  .progress-foreground {
+    stroke: rgba(0, 0, 0, 0.72); /* Black 72% */
+    stroke-linecap: round; /* Make the line ends rounded */
+    transition: stroke-dashoffset 0.3s ease; /* Smooth transition */
+  }
+  /* === End Progress Circle Styles === */
+
+  /* === Simplified CSS for Completed Todos === */
+  /* Style the parent div */
+  div.is-completed {
+    opacity: 0.5;
+    text-decoration: line-through;
+    text-decoration-color: rgba(0, 0, 0, 0.4); 
+  }
+  /* Make checkbox slightly less opaque */
+  div.is-completed .todo-checkbox {
+     opacity: 0.8; /* Adjust as needed */
+     text-decoration: none; 
+  }
+
+  /* REMOVE all other completed/checkbox styling attempts */
+  /* .is-completed { ... } */
+  /* .is-completed .todo-checkbox { ... } */
+  /* .todo-checkbox.is-completed-self { ... } */
 </style> 
