@@ -12,9 +12,6 @@
   // Gray theme color constant
   const grayThemeColor = '#9ca3af'; // Tailwind gray-400
 
-  // Variable to store the theme color before switching to gray
-  let previousThemeColor = null;
-
   // --- Debounce Utility ---
   function debounce(func, wait) {
     let timeout;
@@ -42,37 +39,64 @@
         
         if (storedValue) {
           try {
-            // Parse and validate stored data
+            // Parse stored data (works for strings and JSON)
             const parsedValue = JSON.parse(storedValue);
-            if (Array.isArray(parsedValue) && 
-                parsedValue.every(item => typeof item === 'object' && item !== null &&
-                                typeof item.title === 'string' &&
-                                typeof item.content === 'string')) {
+            let isValid = false;
+
+            // --- Validation Logic ---
+            // Check if the initial value is an array (for notes)
+            if (Array.isArray(initialValue)) {
+              isValid = Array.isArray(parsedValue) && 
+                        parsedValue.every(item => typeof item === 'object' && item !== null &&
+                                        typeof item.title === 'string' &&
+                                        typeof item.content === 'string');
+            } 
+            // Check if the initial value is a string (for theme color)
+            else if (typeof initialValue === 'string') {
+              isValid = typeof parsedValue === 'string';
+              // Optional: Add more specific validation for hex colors if needed
+              // isValid = typeof parsedValue === 'string' && /^#[0-9A-Fa-f]{6}$/.test(parsedValue); 
+            }
+            // --- End Validation Logic ---
+
+            if (isValid) {
               // If valid, set store to stored value
               store.set(parsedValue);
               console.log(`Loaded data from localStorage: ${key}`, parsedValue);
             } else {
               console.warn(`Invalid data in localStorage: ${key}. Using initial value.`);
+              // If invalid, explicitly set the store back to initialValue
+              // and save the initial value back to localStorage to correct it.
+              store.set(initialValue);
+              localStorage.setItem(key, JSON.stringify(initialValue));
             }
           } catch (e) {
             console.error(`Error parsing localStorage data: ${key}`, e);
+            // On parse error, also reset to initial value
+            store.set(initialValue);
+            localStorage.setItem(key, JSON.stringify(initialValue));
           }
         } else {
           console.log(`No data found in localStorage: ${key}. Using initial value.`);
+          // If no stored value, save the initial value
+          localStorage.setItem(key, JSON.stringify(initialValue));
         }
         
         // Save to localStorage whenever store changes
         const saveToLocalStorage = debounce((value) => {
           try {
+            // Always stringify before saving
             localStorage.setItem(key, JSON.stringify(value));
             console.log(`Saved to localStorage: ${key}`);
             
-            // Show save indicator
-            lastSavedText = new Date().toLocaleTimeString();
-            showSaveIndicator = true;
-            setTimeout(() => {
-              showSaveIndicator = false;
-            }, 2000);
+            // Show save indicator only for notes data for now
+            if (key === 'notesAppData') {
+                lastSavedText = new Date().toLocaleTimeString();
+                showSaveIndicator = true;
+                setTimeout(() => {
+                  showSaveIndicator = false;
+                }, 2000);
+            }
           } catch (e) {
             console.error(`Error saving to localStorage: ${key}`, e);
           }
@@ -90,6 +114,32 @@
     
     return store;
   }
+
+  // --- Placeholder Text Helper ---
+  function getPlaceholderText(title) {
+    if (/^Q\d$/.test(title)) { // Matches Q1, Q2, Q3, Q4
+      return `Set a goal for this quarter, type [] for a todo..`;
+    } else if (title === 'This week') {
+      return `Set a goal for this week, type [] for a todo..`;
+    } else if (title === 'Today') {
+      return `Set a goal for today, type [] for a todo..`;
+    }
+    // Fallback placeholder if title doesn't match expected patterns
+    return 'Start writing or type [] for a to-do...';
+  }
+  // --- End Placeholder Text Helper ---
+
+  // --- Effectively Empty Check Helper ---
+  function isEffectivelyEmpty(html) {
+    if (html === null || html === undefined) {
+      return true;
+    }
+    // Remove all <br> tags (case-insensitive) and trim whitespace
+    const cleaned = html.replace(/<br\s*\/?>/gi, '').trim();
+    // Return true if the cleaned string is empty
+    return cleaned === '';
+  }
+  // --- End Effectively Empty Check Helper ---
 
   // Define theme colors (using hex codes for easier manipulation)
   const themeColors = [
@@ -182,11 +232,13 @@
   const notes = localStorageStore('notesAppData', initialNotesState);
   // --- End Initialize Notes Store ---
 
+  // --- Initialize Theme Color Store ---
+  const initialThemeColor = themeColors[0]; // Default to the first color
+  const themeColor = localStorageStore('themeColor', initialThemeColor); 
+  // --- End Initialize Theme Color Store ---
+
   let isTyping = false;
   let typingTimer;
-
-  // Reactive variable for the current theme color
-  let currentThemeColor = themeColors[0]; 
 
   // Reactive variable for main element styles
   let mainStyle = '';
@@ -195,12 +247,21 @@
   let focusMessageText = '';
   let showFocusMessage = false;
   let focusMessageTimeout = null;
+  let showTopFocusMessage = false; // State for the top message
+  let topFocusMessageTimeout = null; // Timeout for the top message
   let quarterCountdown = '';
   let weekCountdown = '';
   let dayCountdown = ''; 
 
   // Function to convert hex to rgba
   function hexToRgba(hex, alpha = 0.2) { // Default alpha 20%
+    // Add check for valid hex string
+    if (typeof hex !== 'string' || !hex) {
+      console.warn("hexToRgba received invalid input:", hex);
+      // Return a default/transparent color to prevent errors
+      return `rgba(0, 0, 0, 0)`; 
+    }
+
     let r = 0, g = 0, b = 0;
     if (hex.length === 4) { // Expand shorthand hex
       r = parseInt(hex[1] + hex[1], 16);
@@ -219,6 +280,7 @@
   function updateSelectionStyle(color) {
     if (!isBrowser) return; // Only run in browser
     
+    // Use $themeColor store value for the color passed to hexToRgba
     const rgbaColor = hexToRgba(color, 0.3); // Use 30% opacity for selection
     if (!selectionStyleElement) {
       selectionStyleElement = document.createElement('style');
@@ -242,15 +304,28 @@
 
   // Function to handle clicks within any editor (for checkbox color change)
   function handleEditorClick(event) {
+    // Check if the clicked element is a checkbox
     if (event.target.matches('.todo-checkbox')) {
-      // Find a new color different from the current one
-      let newColor;
-      do {
-        newColor = themeColors[Math.floor(Math.random() * themeColors.length)];
-      } while (newColor === currentThemeColor && themeColors.length > 1);
-      
-      currentThemeColor = newColor; // Update the reactive variable
-      updateSelectionStyle(currentThemeColor); // Update selection style
+      const checkbox = event.target;
+      const isChecked = checkbox.checked; // Check the current state AFTER the click
+
+      // Find the parent editor area to get the section title
+      const editorArea = checkbox.closest('.editor-area');
+      if (editorArea) {
+        const sectionTitle = editorArea.dataset.title;
+
+        // Existing theme color change logic
+        let newColor;
+        do {
+          newColor = themeColors[Math.floor(Math.random() * themeColors.length)];
+        } while (newColor === $themeColor && themeColors.length > 1); // Use $themeColor here
+        
+        // Update the themeColor store
+        themeColor.set(newColor); // Use .set for direct update
+        
+        // Update selection style *with the new color*
+        updateSelectionStyle(newColor); 
+      }
     }
   }
 
@@ -271,31 +346,56 @@
     }
     tempDiv.innerHTML = ''; // Clear temp div content
 
+    // Get the current theme color from the store
+    const currentTheme = $themeColor;
+
     // Apply theme logic
     if (anySectionHasMoreThanOneCheckbox) {
       // If need to switch to gray and not already gray
-      if (currentThemeColor !== grayThemeColor) {
+      if (currentTheme !== grayThemeColor) {
         console.log("Switching theme to gray");
-        previousThemeColor = currentThemeColor; // Store the current color
-        currentThemeColor = grayThemeColor; // Set to gray (triggers reactive update)
+        // Store the current (non-gray) color before switching
+        // We store it directly in localStorage for persistence across sessions
+        // Note: This assumes we only want to remember *one* previous color
+        localStorage.setItem('previousThemeColor', currentTheme); 
+        themeColor.set(grayThemeColor); // Update the store to gray
       }
     } else {
       // If need to switch back from gray
-      if (currentThemeColor === grayThemeColor) {
+      if (currentTheme === grayThemeColor) {
         console.log("Reverting theme from gray");
-        if (previousThemeColor) {
-          currentThemeColor = previousThemeColor; // Revert to stored color
-          previousThemeColor = null; // Clear stored color
+        // Try to retrieve the previously saved color from localStorage
+        const savedPreviousColor = localStorage.getItem('previousThemeColor');
+        if (savedPreviousColor && themeColors.includes(savedPreviousColor)) {
+          themeColor.set(savedPreviousColor); // Revert to stored color
         } else {
-          // Fallback if previousThemeColor is somehow null (e.g., initial load started gray)
-          // Pick the first theme color as a default if reverting from gray without a stored previous color
-          currentThemeColor = themeColors[0]; 
+          // Fallback if no valid previous color found in localStorage
+          // Revert to the initial default color
+          themeColor.set(initialThemeColor); 
         }
+        // Clear the stored previous color once reverted
+        localStorage.removeItem('previousThemeColor'); 
       }
       // If not gray and no section has > 1 checkbox, do nothing (keep current theme)
     }
   }
   // --- End checkAndUpdateTheme ---
+
+  // Helper function to check if any ancestor up to the editor contains a checkbox
+  function lineAlreadyHasCheckbox(startNode, editorNode) {
+      let currentNode = startNode;
+      // Traverse up from the starting node until we hit the editor or null
+      while (currentNode && currentNode !== editorNode) {
+          // Check if the current node itself is an element and contains a checkbox
+          if (currentNode.nodeType === Node.ELEMENT_NODE && currentNode.querySelector('.todo-checkbox')) {
+              return true; // Found a checkbox in an ancestor
+          }
+          // Move up to the parent node
+          currentNode = currentNode.parentNode;
+      }
+      // If we reached the editor or null without finding a checkbox in any ancestor
+      return false; 
+  }
 
   // Function to handle input and check for [] pattern
   function handleInput(event) {
@@ -307,8 +407,6 @@
     const selection = window.getSelection();
     const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
 
-    let replaced = false; // Flag to check if we replaced []
-
     // Check if the input likely resulted in "[]" just before the caret
     if (range && range.collapsed) {
         const node = range.startContainer;
@@ -317,57 +415,126 @@
         // Ensure we are in a text node and there's enough text before the caret
         if (node.nodeType === Node.TEXT_NODE && offset >= 2) {
             if (node.textContent.substring(offset - 2, offset) === '[]') {
-                // Create the checkbox element
-                const checkbox = document.createElement('input');
-                checkbox.type = 'checkbox';
-                checkbox.className = 'todo-checkbox';
-                checkbox.contentEditable = 'false'; // Prevent editing the checkbox itself
+                
+                // --- MODIFIED CHECK: Use upward traversal --- 
+                const alreadyHasCheckbox = lineAlreadyHasCheckbox(node, editor);
+                console.log("Checking for [] input. Node:", node, "Already has checkbox in line?", alreadyHasCheckbox);
 
-                // Create a non-breaking space node to go after the checkbox
-                const spaceNode = document.createTextNode('\u00A0'); // &nbsp;
+                if (!alreadyHasCheckbox) { // Use the new check result
+                    // Prevent default insertion of '[]' and our own replacement logic
+                    event.preventDefault(); 
 
-                // Create a range covering the "[]" text
-                const replaceRange = document.createRange();
-                replaceRange.setStart(node, offset - 2); // Start before '['
-                replaceRange.setEnd(node, offset);       // End after ']'
+                    // Create the checkbox element
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.className = 'todo-checkbox';
+                    checkbox.contentEditable = 'false'; // Prevent editing the checkbox itself
 
-                // Delete the "[]" text
-                replaceRange.deleteContents();
+                    // Create a non-breaking space node to go after the checkbox
+                    const spaceNode = document.createTextNode('\u00A0'); // &nbsp;
 
-                // Insert the checkbox and then the space node at the caret position
-                // Insert space first, then checkbox before it. This places checkbox then space.
-                replaceRange.insertNode(spaceNode);
-                replaceRange.insertNode(checkbox);
+                    // --- Refined Range manipulation --- 
+                    // 1. Remember the exact start position *before* deleting '[]'
+                    //    Need container and offset from the original range where '[]' was detected
+                    const insertContainer = range.startContainer; 
+                    const insertOffset = range.startOffset - 2; // Position before '['
 
-                // Set the caret position *after* the inserted space node
-                // Need to get a new range instance after modification
-                const newRange = document.createRange();
-                newRange.setStartAfter(spaceNode);
-                newRange.collapse(true);
-                selection.removeAllRanges(); // Clear previous selection
-                selection.addRange(newRange);   // Set the new cursor position
+                    // 2. Delete the "[]" text using the original text node and offset
+                    const deleteRange = document.createRange();
+                    deleteRange.setStart(node, offset - 2); // node is the text node where '[]' was found
+                    deleteRange.setEnd(node, offset);       // offset is position after ']'
+                    deleteRange.deleteContents();
 
-                replaced = true; // Mark that we performed the replacement
-                event.preventDefault(); // Prevent potential default actions
+                    // 3. Insert checkbox + space *at the deletion point*
+                    //    Use the remembered container and offset.
+                    const insertRange = document.createRange();
+                    insertRange.setStart(insertContainer, insertOffset); 
+                    insertRange.collapse(true);
+
+                    // Insert space first, then checkbox (DOM order becomes checkbox, space)
+                    insertRange.insertNode(spaceNode);
+                    insertRange.insertNode(checkbox);
+
+                    // 4. Set the caret position *after* the inserted space node
+                    selection.removeAllRanges(); // Clear previous selection
+                    const finalRange = document.createRange();
+                    finalRange.setStartAfter(spaceNode);
+                    finalRange.collapse(true);
+                    selection.addRange(finalRange);   // Set the new cursor position
+                    // --- End Refined Range manipulation ---
+                    
+                    // Trigger store update manually as we prevented default input event's update
+                    // Use timeout for safety after DOM manipulation
+                    setTimeout(() => {
+                        const currentContentHTML = editor.innerHTML;
+                        const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
+                        notes.update(currentNotes =>
+                            currentNotes.map(note =>
+                                note.title === sectionTitle ? { ...note, content: contentToSave } : note
+                            )
+                        );
+                        checkAndUpdateTheme($notes); // Also check theme
+                    }, 0);
+
+                } else {
+                    // Block already has a checkbox, or no block found - do nothing special.
+                    // Allow default behavior (typing '[]'). The store update will happen below naturally.
+                    console.log("Block already has checkbox or not found. Allowing default '[]' typing.");
+                }
+                // --- MODIFIED END --- 
             }
         }
     }
 
-    // Update the store *after* DOM manipulation (use timeout for safety)
+    // Update the store *after* DOM manipulation or default input (use timeout for safety)
+    // This still runs even if we prevented default above, but it's fine.
     setTimeout(() => {
-        const currentContent = editor.innerHTML;
+        const currentContentHTML = editor.innerHTML;
+        // Check if content is just <br> tags or whitespace
+        const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
+        
         notes.update(currentNotes =>
             currentNotes.map(note =>
-                note.title === sectionTitle ? { ...note, content: currentContent } : note
+                note.title === sectionTitle ? { ...note, content: contentToSave } : note
             )
         );
 
         // --- Theme Check Logic (runs after store update) ---
+        // Only run theme check if we didn't manually trigger it above
+        // (Avoid double-check)
+        // This check is subtle: if we *did* prevent default, the notes update happens
+        // inside the `if (currentBlock && !blockAlreadyHasCheckbox)` block.
+        // If we *didn't* prevent default, it happens here.
+        // For simplicity, let's just call it always here. Debounce/timing should handle it ok.
         checkAndUpdateTheme($notes);
         // --- End Theme Check Logic ---
     }, 0);
   }
   // --- End handleInput ---
+
+  // Helper function to find the block-level element containing a node
+  function getBlockElement(node, editorNode) {
+    let traversalNode = node; // Use a different variable for traversal
+    while (traversalNode && traversalNode !== editorNode) { // Traverse up until the editor boundary
+        // Handle text nodes by checking their parent
+        const checkNode = traversalNode.nodeType === Node.TEXT_NODE ? traversalNode.parentNode : traversalNode;
+        if (!checkNode || checkNode === editorNode) {
+            break; // Stop if parent is editor or null
+        }
+
+        const display = window.getComputedStyle(checkNode).display;
+        // Check if the node is considered block-level
+        if (['block', 'list-item', 'table-cell', 'flex', 'grid'].includes(display)) {
+            return checkNode;
+        }
+        // If it's an inline element within the editor, continue up
+        traversalNode = checkNode.parentNode;
+    }
+    // If no block element found below the editor, return the editor itself
+    // or null if the initial node was somehow outside
+    const result = traversalNode === editorNode ? editorNode : null;
+    return result;
+  }
 
   // --- handleKeydown (handles Enter and Backspace for checkboxes) ---
   function handleKeydown(event) {
@@ -377,20 +544,31 @@
 
     if (event.key === 'Enter') {
       console.log('Enter key pressed');
-      event.preventDefault(); // Prevent default Enter behavior always
       const range = selection.getRangeAt(0);
       const container = range.startContainer;
+      console.log('Enter press container:', container); // Keep log for now
 
-      let parentElement = container.nodeType === Node.TEXT_NODE ? container.parentNode : container;
-      console.log('Parent element:', parentElement);
+      // --- SIMPLIFIED CHECK: Look at immediate parent or container --- 
+      let isOnTodoLine = false;
+      if (container.nodeType === Node.TEXT_NODE && container.parentNode) {
+          // Cursor is in a text node, check its direct parent element
+          isOnTodoLine = container.parentNode.querySelector('.todo-checkbox') !== null;
+          console.log('Enter check: Text node parent check:', container.parentNode, isOnTodoLine);
+      } else if (container.nodeType === Node.ELEMENT_NODE) {
+          // Cursor container is an element, check it directly
+          isOnTodoLine = container.querySelector('.todo-checkbox') !== null;
+          // Also check if the element itself *is* the editor (should not be treated as todo line)
+          if (container === editor) {
+              isOnTodoLine = false; 
+          }
+          console.log('Enter check: Element container check:', container, isOnTodoLine);
+      }
+      // --- End simplified check ---
 
-      // Heuristic: Check if the parent element starts with a checkbox
-      const startsWithCheckbox = parentElement.firstChild && 
-                               parentElement.firstChild.nodeType === Node.ELEMENT_NODE && 
-                               parentElement.firstChild.classList.contains('todo-checkbox');
-      console.log('startsWithCheckbox:', startsWithCheckbox);
-
-      if (startsWithCheckbox) {
+      // Use the revised 'isOnTodoLine' condition
+      if (isOnTodoLine) {
+          // --- Checkbox Line Enter Logic --- 
+          event.preventDefault(); // Prevent default ONLY for checkbox lines
           console.log('Condition met: Inserting new checkbox...');
           // Create elements first
           const br = document.createElement('br');
@@ -419,28 +597,25 @@
           selection.removeAllRanges();
           selection.addRange(finalRange);
 
-          console.log('DOM manipulation complete. Setting store update timeout.');
-          // Update store since we modified the DOM directly
+          // --- End Focus Message Logic ---
           setTimeout(() => {
              const sectionTitle = editor.dataset.title;
-             const currentContent = editor.innerHTML;
+             const currentContentHTML = editor.innerHTML;
+             // Check if content is just <br> tags or whitespace
+             const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
              notes.update(currentNotes =>
                  currentNotes.map(note =>
-                     note.title === sectionTitle ? { ...note, content: currentContent } : note
+                     note.title === sectionTitle ? { ...note, content: contentToSave } : note
                  )
              );
-             // Check theme after updating store
-             checkAndUpdateTheme($notes);
-
-             // --- Focus Message Logic ADDED here ---
              // Count checkboxes in the *current* section after adding one
              const tempDiv = document.createElement('div');
-             tempDiv.innerHTML = currentContent; // Use content just added
+             tempDiv.innerHTML = currentContentHTML; // Use content just added
              const checkboxCount = tempDiv.querySelectorAll('.todo-checkbox').length;
 
-             // Show message *only* when the count becomes exactly 2
+             // Show bottom message *only* when the count becomes exactly 2
              if (checkboxCount === 2) {
-                 console.log("Showing focus message - count became 2");
+                 console.log("Showing bottom focus message - count became 2");
                  focusMessageText = "focus on one goal that matters";
                  showFocusMessage = true;
                  clearTimeout(focusMessageTimeout); // Clear previous timer if any
@@ -448,63 +623,100 @@
                      showFocusMessage = false;
                  }, 4000); // Hide after 4 seconds
              }
-             // --- End Focus Message Logic ---
-
+             // Show top message *only* when the count becomes exactly 3
+             else if (checkboxCount === 3) {
+                 console.log("Showing top focus message - count became 3");
+                 showTopFocusMessage = true;
+                 clearTimeout(topFocusMessageTimeout); // Clear previous top timer
+                 topFocusMessageTimeout = setTimeout(() => {
+                    showTopFocusMessage = false;
+                 }, 4000); // Hide after 4 seconds
+             }
          }, 0);
+         // --- End Checkbox Line Enter Logic --- 
       } else {
-          console.log('Condition NOT met: Inserting simple line break...');
-          // If line does not start with checkbox, just insert a line break
-          const br = document.createElement('br');
-          range.insertNode(br);
-          range.setStartAfter(br);
-          range.collapse(true); // Collapse cursor to after the inserted <br>
-
-          selection.removeAllRanges();
-          selection.addRange(range);
-
-          // Update store immediately
-          setTimeout(() => {
-             const sectionTitle = editor.dataset.title;
-             const currentContent = editor.innerHTML;
-             notes.update(currentNotes =>
-                 currentNotes.map(note =>
-                     note.title === sectionTitle ? { ...note, content: currentContent } : note
-                 )
-             );
-             // Optionally check theme here too for consistency, though unlikely to change
-             // checkAndUpdateTheme($notes); 
-         }, 0);
+          // --- Normal Enter Logic --- 
+          console.log('Condition NOT met: Allowing default browser Enter behavior...');
+          // No event.preventDefault() here.
+          // The browser will insert <br> or wrap in <div>/</div> etc.
+          // The subsequent 'input' event will trigger handleInput, which updates the store.
+          handleTypingState(); // Still indicate typing is happening
+          // --- End Normal Enter Logic ---
       }
     } else if (event.key === 'Backspace') {
-      console.log("Backspace detected");
+      console.log("--- Backspace Keydown Start ---");
       const selection = window.getSelection();
       if (!selection || selection.rangeCount === 0) {
           console.log("Backspace: No selection or range count is 0");
           return;
       }
+
+      const range = selection.getRangeAt(0);
+      const container = range.startContainer; 
+      const offset = range.startOffset;      
+      const editor = event.target;
+      console.log(`Backspace Context: Container Node=`, container);
+      console.log(`Backspace Context: Container Type=`, container.nodeType);
+      console.log(`Backspace Context: Container Name=`, container.nodeName);
+      console.log(`Backspace Context: Offset=`, offset);
+
       if (!selection.isCollapsed) { 
         console.log("Backspace on selection - allowing default");
         handleTypingState(); 
         return;
       }
-      const range = selection.getRangeAt(0);
-      const container = range.startContainer; // Expected to be the editor DIV
-      const offset = range.startOffset;      // Expected to be index in childNodes
-      const editor = event.target;
-      console.log(`Backspace: Container=${container.nodeName}, offset=${offset}`);
+      
+      // --- ADDED: Specific check for cursor AFTER the space node --- 
+      if (container.nodeType === Node.TEXT_NODE && container.textContent === '\u00A0' && offset >= 1) { // Offset 1 or 2, depending on browser
+          console.log("Backspace Check: Cursor is at the end of the space node.");
+          const checkboxToRemove = container.previousSibling;
+          if (checkboxToRemove && checkboxToRemove.nodeType === Node.ELEMENT_NODE && checkboxToRemove.classList.contains('todo-checkbox')) {
+              console.log("HANDLING VIA NEW CHECK: Backspace deleting space node and preceding checkbox.");
+              event.preventDefault();
+
+              // Check and remove preceding BR (copied from Case 1)
+              const brToRemove = checkboxToRemove.previousSibling;
+              if (brToRemove && brToRemove.nodeName === 'BR') {
+                  console.log("HANDLING: Also removing preceding BR tag.");
+                  brToRemove.remove();
+              }
+
+              // Remove checkbox and space node
+              checkboxToRemove.remove();
+              container.remove(); // Remove the space node itself
+
+              // Update store & theme
+              setTimeout(() => {
+                  const sectionTitle = editor.dataset.title;
+                  const currentContentHTML = editor.innerHTML;
+                  const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
+                  notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: contentToSave } : note));
+                  checkAndUpdateTheme($notes);
+              }, 0);
+              return; // Handled
+          }
+      }
+      // --- END ADDED CHECK ---
 
       // Get the node immediately before the logical cursor position within the container
       const nodeBefore = offset > 0 ? container.childNodes[offset - 1] : null;
-      console.log(`Node before cursor: ${nodeBefore?.nodeName}, type=${nodeBefore?.nodeType}, text='${nodeBefore?.textContent?.replace('\u00A0','&nbsp;')}'`);
+      console.log(`Backspace Check: nodeBefore=`, nodeBefore); 
+      if(nodeBefore) {
+        console.log(`Backspace Check: nodeBefore Type=`, nodeBefore.nodeType);
+        console.log(`Backspace Check: nodeBefore Name=`, nodeBefore.nodeName);
+        console.log(`Backspace Check: nodeBefore Text=`, nodeBefore.textContent);
+      }
 
       if (nodeBefore) {
         // === CASE 1: Node before cursor is the &nbsp; text node ===
+        console.log("Backspace Check: Evaluating Case 1 (Space Node Check)");
         if (nodeBefore.nodeType === Node.TEXT_NODE && nodeBefore.textContent === '\u00A0') {
+          console.log("Backspace Check: Case 1 Condition Met (Node is Space)");
           const checkboxToRemove = nodeBefore.previousSibling;
-          console.log(`Space Node Check: Node before space=${checkboxToRemove?.nodeName}, classList=${checkboxToRemove?.classList}`);
+          console.log(`Space Node Check: Node before space=`, checkboxToRemove);
           if (checkboxToRemove && checkboxToRemove.nodeType === Node.ELEMENT_NODE && checkboxToRemove.classList.contains('todo-checkbox')) {
+            console.log("HANDLING VIA CASE 1: Backspace deleting space node after checkbox.");
             event.preventDefault();
-            console.log("HANDLING: Backspace deleting space node after checkbox.");
 
             // Check and remove preceding BR
             const brToRemove = checkboxToRemove.previousSibling;
@@ -520,8 +732,10 @@
             // Update store & theme
             setTimeout(() => {
                 const sectionTitle = editor.dataset.title;
-                const currentContent = editor.innerHTML;
-                notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: currentContent } : note));
+                const currentContentHTML = editor.innerHTML;
+                 // Check if content is just <br> tags or whitespace
+                const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
+                notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: contentToSave } : note));
                 checkAndUpdateTheme($notes);
             }, 0);
             return; // Handled
@@ -529,9 +743,11 @@
         }
 
         // === CASE 2: Node before cursor is the checkbox element itself ===
+        console.log("Backspace Check: Evaluating Case 2 (Checkbox Node Check)");
         if (nodeBefore.nodeType === Node.ELEMENT_NODE && nodeBefore.classList.contains('todo-checkbox')) {
+          console.log("Backspace Check: Case 2 Condition Met (Node is Checkbox)");
           event.preventDefault();
-          console.log("HANDLING: Backspace deleting checkbox element directly.");
+          console.log("HANDLING VIA CASE 2: Backspace deleting checkbox element directly.");
           const checkboxToRemove = nodeBefore;
 
           // Check and remove following space node
@@ -547,17 +763,44 @@
           // Update store & theme
           setTimeout(() => {
               const sectionTitle = editor.dataset.title;
-              const currentContent = editor.innerHTML;
-              notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: currentContent } : note));
+              const currentContentHTML = editor.innerHTML;
+               // Check if content is just <br> tags or whitespace
+              const contentToSave = isEffectivelyEmpty(currentContentHTML) ? '' : currentContentHTML;
+              notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: contentToSave } : note));
               checkAndUpdateTheme($notes);
           }, 0);
           return; // Handled
         }
       }
 
+      // --- Specific check for Backspace at the very beginning --- 
+      console.log("Backspace Check: Evaluating Case 3 (Empty Editor Start Check)");
+      // Check if cursor is at offset 0 within the main editor element itself
+      if (offset === 0 && container === editor) {
+        // Check if the editor is effectively empty (contains nothing or just a single <br>)
+        const currentHTML = editor.innerHTML.trim();
+        if (isEffectivelyEmpty(currentHTML)) { // Use helper function here too
+          console.log("HANDLING: Backspace pressed at start of effectively empty editor.");
+          event.preventDefault(); // Prevent default backspace
+          if (editor.innerHTML !== '') { // Avoid unnecessary DOM update if already empty
+            editor.innerHTML = ''; // Ensure it's truly empty
+            // Update store immediately since we changed content
+            setTimeout(() => {
+              const sectionTitle = editor.dataset.title;
+              // Ensure we save an empty string
+              notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: '' } : note));
+              checkAndUpdateTheme($notes); // Check theme in case removing last item affects it
+            }, 0);
+          }
+          return; // Handled
+        }
+      }
+      // --- End specific check ---
+
       // --- If neither case handled it, allow default --- 
       console.log("ALLOWING DEFAULT: Backspace - No specific handling triggered.");
       handleTypingState();
+      console.log("--- Backspace Keydown End ---");
 
     } else {
         // Handle typing state for other keys
@@ -567,12 +810,9 @@
   // --- End handleKeydown ---
 
   // Svelte action to initialize the contenteditable element and handle updates safely
-  function initContent(node, content) {
-    // Set the initial content only if it's different
-    // This check prevents unnecessary overwrites and potential flicker on load
-    if (node.innerHTML !== content) {
-        node.innerHTML = content;
-    }
+  function initContent(node, initialContent) {
+    // Set the initial content directly on first run, ensuring empty string clears innerHTML
+    node.innerHTML = initialContent;
 
     return {
       update(newContent) {
@@ -589,14 +829,16 @@
     };
   }
 
-  // Reactive statement to update mainStyle whenever currentThemeColor changes
+  // Reactive statement to update mainStyle whenever themeColor store changes
   $:
   {
-    const hoverColor = hexToRgba(currentThemeColor, 0.16); // Calculate hover color with 16% alpha
-    const bgColor = hexToRgba(currentThemeColor, 0.03);    // Calculate background color with 3% alpha
-    mainStyle = `--theme-color: ${currentThemeColor}; --theme-color-hover: ${hoverColor}; background-color: ${bgColor};`; // Add background-color
+    // Read the current theme color directly from the store
+    const currentTheme = $themeColor;
+    const hoverColor = hexToRgba(currentTheme, 0.16); // Calculate hover color with 16% alpha
+    const bgColor = hexToRgba(currentTheme, 0.03);    // Calculate background color with 3% alpha
+    mainStyle = `--theme-color: ${currentTheme}; --theme-color-hover: ${hoverColor}; background-color: ${bgColor};`; // Add background-color
     // Also update selection style whenever theme changes
-    updateSelectionStyle(currentThemeColor);
+    updateSelectionStyle(currentTheme);
   }
 
   onMount(() => {
@@ -670,15 +912,6 @@
       }
     }, 3600 * 1000); // Check every hour
 
-    // --- Initial Theme Check --- 
-    // Call checkAndUpdateTheme after the store is potentially populated by localStorageStore
-    // We might need a slight delay or ensure the store is ready
-    // Subscribing once should give us the initial value after potential async loading
-    const unsubscribe = notes.subscribe(initialNotes => {
-      checkAndUpdateTheme(initialNotes);
-    });
-    unsubscribe(); // Unsubscribe immediately after getting the initial value
-
     // Cleanup timer and intervals on unmount
     return () => {
       clearTimeout(typingTimer);
@@ -686,6 +919,7 @@
       clearInterval(countdownUpdateInterval);
       clearInterval(longerInterval); // Clear the less frequent interval too
       clearTimeout(focusMessageTimeout); // Clear focus message timeout on unmount
+      clearTimeout(topFocusMessageTimeout); // Clear top focus message timeout on unmount
       if (selectionStyleElement && selectionStyleElement.parentNode) {
         selectionStyleElement.parentNode.removeChild(selectionStyleElement);
       }
@@ -697,6 +931,20 @@
   class="flex flex-col items-center justify-center min-h-screen w-full pt-8 pb-16 space-y-2"
   style={mainStyle}
 >
+  <!-- Top Focus Message Indicator -->
+  <div
+    class="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 px-3 py-2 rounded-full shadow-md 
+           transition-all duration-500 ease-in-out -translate-y-full"
+    class:opacity-0={!showTopFocusMessage}
+    class:opacity-100={showTopFocusMessage}
+    class:-translate-y-full={!showTopFocusMessage} 
+    class:translate-y-0={showTopFocusMessage}
+    style="background-color: #DC2626; color: white;"
+  >
+    <!-- Start offscreen above when hidden, slide down when shown -->
+    Focus!
+  </div>
+
   <!-- Iterate over the notes array from the store -->
   {#each $notes as note (note.title)}
     <!-- Section -->
@@ -727,10 +975,11 @@
         contenteditable="true"
         role="textbox"
         aria-multiline="true"
+        tabindex="0"
         data-title={note.title}
         class="flex-grow focus:outline-none text-gray-800 editor-area"
         class:typing={isTyping}
-        placeholder="Start writing or type [] for a to-do..."
+        placeholder={getPlaceholderText(note.title)}
         style="line-height: 1.6;"
         use:initContent={note.content}
         on:input={handleInput} 
@@ -759,6 +1008,7 @@
     class:translate-y-0={showFocusMessage}
     style="background-color: #007AFF; color: white;"
   >
+    <!-- Start offscreen below when hidden, slide up when shown -->
     {focusMessageText}
   </div>
 </main>
@@ -865,4 +1115,43 @@
     background-position: center;
     background-repeat: no-repeat;
   }
+
+  /* === MOVED CELEBRATION STYLES START === */
+  /* Celebration styles */
+  .celebration-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 9999; /* Very high z-index */
+    overflow: hidden; /* Prevent scrollbars */
+    pointer-events: none; /* Allow interactions with content underneath */
+  }
+
+  .fire-emoji {
+    position: absolute;
+    display: inline-block;
+    opacity: 0; /* Start invisible, animation makes it visible */
+    will-change: transform, opacity; /* Hint for browser optimization */
+    /* Start scaled down */
+    transform: scale(0);
+  }
+
+  /* Simple explosion animation: scale up and fade out */
+  @keyframes explode {
+    0% {
+      opacity: 1;
+      transform: scale(0.5); /* Start slightly visible and small */
+    }
+    50% {
+       opacity: 1;
+       transform: scale(1.2); /* Grow */
+    }
+    100% {
+      opacity: 0;
+      transform: scale(2.5); /* Expand further while fading */
+    }
+  }
+  /* === MOVED CELEBRATION STYLES END === */
 </style> 
