@@ -9,6 +9,12 @@
   let lastSavedText = "";
   let showSaveIndicator = false;
 
+  // Gray theme color constant
+  const grayThemeColor = '#9ca3af'; // Tailwind gray-400
+
+  // Variable to store the theme color before switching to gray
+  let previousThemeColor = null;
+
   // --- Debounce Utility ---
   function debounce(func, wait) {
     let timeout;
@@ -248,6 +254,49 @@
     }
   }
 
+  // --- Function to Check Checkbox Counts and Update Theme ---
+  function checkAndUpdateTheme(currentNotes) {
+    if (!isBrowser) return; // Ensure running in browser
+
+    let anySectionHasMoreThanOneCheckbox = false;
+    const tempDiv = document.createElement('div'); // Reuse one div
+
+    for (const note of currentNotes) {
+      tempDiv.innerHTML = note.content; // Parse content
+      const checkboxCount = tempDiv.querySelectorAll('.todo-checkbox').length;
+      if (checkboxCount > 1) {
+        anySectionHasMoreThanOneCheckbox = true;
+        break; // Found one, no need to check further
+      }
+    }
+    tempDiv.innerHTML = ''; // Clear temp div content
+
+    // Apply theme logic
+    if (anySectionHasMoreThanOneCheckbox) {
+      // If need to switch to gray and not already gray
+      if (currentThemeColor !== grayThemeColor) {
+        console.log("Switching theme to gray");
+        previousThemeColor = currentThemeColor; // Store the current color
+        currentThemeColor = grayThemeColor; // Set to gray (triggers reactive update)
+      }
+    } else {
+      // If need to switch back from gray
+      if (currentThemeColor === grayThemeColor) {
+        console.log("Reverting theme from gray");
+        if (previousThemeColor) {
+          currentThemeColor = previousThemeColor; // Revert to stored color
+          previousThemeColor = null; // Clear stored color
+        } else {
+          // Fallback if previousThemeColor is somehow null (e.g., initial load started gray)
+          // Pick the first theme color as a default if reverting from gray without a stored previous color
+          currentThemeColor = themeColors[0]; 
+        }
+      }
+      // If not gray and no section has > 1 checkbox, do nothing (keep current theme)
+    }
+  }
+  // --- End checkAndUpdateTheme ---
+
   // Function to handle input and check for [] pattern
   function handleInput(event) {
     if (!event.target.matches('.editor-area')) return;
@@ -305,8 +354,6 @@
     }
 
     // Update the store *after* DOM manipulation (use timeout for safety)
-    // This ensures the store reflects the latest state after our direct change
-    // The timeout allows the browser to process the DOM changes before we read innerHTML
     setTimeout(() => {
         const currentContent = editor.innerHTML;
         notes.update(currentNotes =>
@@ -315,24 +362,9 @@
             )
         );
 
-        // --- Focus Message Logic --- 
-        // Count checkboxes in the current section's updated content
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = currentContent;
-        const checkboxCount = tempDiv.querySelectorAll('.todo-checkbox').length;
-
-        // Show message if more than one checkbox
-        if (checkboxCount > 1) {
-            focusMessageText = "focus on one goal that matters";
-            showFocusMessage = true;
-            // Clear previous hide timeout if it exists
-            clearTimeout(focusMessageTimeout);
-            // Set new timeout to hide the message
-            focusMessageTimeout = setTimeout(() => {
-                showFocusMessage = false;
-            }, 4000); // Hide after 4 seconds
-        }
-        // --- End Focus Message Logic ---
+        // --- Theme Check Logic (runs after store update) ---
+        checkAndUpdateTheme($notes);
+        // --- End Theme Check Logic ---
     }, 0);
   }
   // --- End handleInput ---
@@ -397,6 +429,27 @@
                      note.title === sectionTitle ? { ...note, content: currentContent } : note
                  )
              );
+             // Check theme after updating store
+             checkAndUpdateTheme($notes);
+
+             // --- Focus Message Logic ADDED here ---
+             // Count checkboxes in the *current* section after adding one
+             const tempDiv = document.createElement('div');
+             tempDiv.innerHTML = currentContent; // Use content just added
+             const checkboxCount = tempDiv.querySelectorAll('.todo-checkbox').length;
+
+             // Show message *only* when the count becomes exactly 2
+             if (checkboxCount === 2) {
+                 console.log("Showing focus message - count became 2");
+                 focusMessageText = "focus on one goal that matters";
+                 showFocusMessage = true;
+                 clearTimeout(focusMessageTimeout); // Clear previous timer if any
+                 focusMessageTimeout = setTimeout(() => {
+                     showFocusMessage = false;
+                 }, 4000); // Hide after 4 seconds
+             }
+             // --- End Focus Message Logic ---
+
          }, 0);
       } else {
           console.log('Condition NOT met: Inserting simple line break...');
@@ -418,75 +471,94 @@
                      note.title === sectionTitle ? { ...note, content: currentContent } : note
                  )
              );
+             // Optionally check theme here too for consistency, though unlikely to change
+             // checkAndUpdateTheme($notes); 
          }, 0);
       }
     } else if (event.key === 'Backspace') {
-      if (!selection.isCollapsed) {
-        handleTypingState(); // Allow default for selection delete
-        return; 
+      console.log("Backspace detected");
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0) {
+          console.log("Backspace: No selection or range count is 0");
+          return;
       }
-
+      if (!selection.isCollapsed) { 
+        console.log("Backspace on selection - allowing default");
+        handleTypingState(); 
+        return;
+      }
       const range = selection.getRangeAt(0);
-      const container = range.startContainer;
-      const offset = range.startOffset;
+      const container = range.startContainer; // Expected to be the editor DIV
+      const offset = range.startOffset;      // Expected to be index in childNodes
+      const editor = event.target;
+      console.log(`Backspace: Container=${container.nodeName}, offset=${offset}`);
 
-      // Check if we are at the very beginning of the editor content
-      if ((container === editor || editor.contains(container)) && offset === 0 && !container.previousSibling) {
-         // More robust check: check if caret is effectively at pos 0 of editor
-         const tempRange = document.createRange();
-         tempRange.selectNodeContents(editor);
-         tempRange.setEnd(container, offset);
-         if (tempRange.toString() === '') {
-            handleTypingState(); // At very start, nothing to delete before
-            return; 
-         }
-      }
-        
-      let nodeBeforeCursor = null;
-      try {
-         if (offset > 0) {
-            // If offset > 0, check the node within the same container at offset - 1
-            if (container.nodeType === Node.ELEMENT_NODE) {
-                const potentialCheckbox = container.childNodes[offset - 1];
-                if (potentialCheckbox && potentialCheckbox.nodeType === Node.ELEMENT_NODE && potentialCheckbox.classList.contains('todo-checkbox')) {
-                    nodeBeforeCursor = potentialCheckbox;
-                }
+      // Get the node immediately before the logical cursor position within the container
+      const nodeBefore = offset > 0 ? container.childNodes[offset - 1] : null;
+      console.log(`Node before cursor: ${nodeBefore?.nodeName}, type=${nodeBefore?.nodeType}, text='${nodeBefore?.textContent?.replace('\u00A0','&nbsp;')}'`);
+
+      if (nodeBefore) {
+        // === CASE 1: Node before cursor is the &nbsp; text node ===
+        if (nodeBefore.nodeType === Node.TEXT_NODE && nodeBefore.textContent === '\u00A0') {
+          const checkboxToRemove = nodeBefore.previousSibling;
+          console.log(`Space Node Check: Node before space=${checkboxToRemove?.nodeName}, classList=${checkboxToRemove?.classList}`);
+          if (checkboxToRemove && checkboxToRemove.nodeType === Node.ELEMENT_NODE && checkboxToRemove.classList.contains('todo-checkbox')) {
+            event.preventDefault();
+            console.log("HANDLING: Backspace deleting space node after checkbox.");
+
+            // Check and remove preceding BR
+            const brToRemove = checkboxToRemove.previousSibling;
+            if (brToRemove && brToRemove.nodeName === 'BR') {
+              console.log("HANDLING: Also removing preceding BR tag.");
+              brToRemove.remove();
             }
-            // If text node, default backspace handles char delete
-        } else { // offset === 0, cursor is at the beginning of container
-            // Look at the node logically before the container
-            let previousNode = container.previousSibling;
-            // Skip insignificant whitespace nodes if necessary (though less common with our structure)
-            while (previousNode && previousNode.nodeType === Node.TEXT_NODE && !previousNode.textContent.trim()) {
-               previousNode = previousNode.previousSibling;
-            }
-            if (previousNode && previousNode.nodeType === Node.ELEMENT_NODE && previousNode.classList.contains('todo-checkbox')) {
-                nodeBeforeCursor = previousNode;
-            }
+
+            // Remove checkbox and space node
+            checkboxToRemove.remove();
+            nodeBefore.remove(); // Remove the space node
+
+            // Update store & theme
+            setTimeout(() => {
+                const sectionTitle = editor.dataset.title;
+                const currentContent = editor.innerHTML;
+                notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: currentContent } : note));
+                checkAndUpdateTheme($notes);
+            }, 0);
+            return; // Handled
+          }
         }
-      } catch (e) {
-         console.warn("Error checking node before cursor for backspace:", e);
+
+        // === CASE 2: Node before cursor is the checkbox element itself ===
+        if (nodeBefore.nodeType === Node.ELEMENT_NODE && nodeBefore.classList.contains('todo-checkbox')) {
+          event.preventDefault();
+          console.log("HANDLING: Backspace deleting checkbox element directly.");
+          const checkboxToRemove = nodeBefore;
+
+          // Check and remove following space node
+          const spaceNodeToRemove = checkboxToRemove.nextSibling;
+          if (spaceNodeToRemove && spaceNodeToRemove.nodeType === Node.TEXT_NODE && spaceNodeToRemove.textContent === '\u00A0') {
+             console.log("HANDLING: Also removing following space node.");
+             spaceNodeToRemove.remove();
+          }
+
+          // Remove checkbox
+          checkboxToRemove.remove();
+
+          // Update store & theme
+          setTimeout(() => {
+              const sectionTitle = editor.dataset.title;
+              const currentContent = editor.innerHTML;
+              notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: currentContent } : note));
+              checkAndUpdateTheme($notes);
+          }, 0);
+          return; // Handled
+        }
       }
 
-      if (nodeBeforeCursor) {
-        // Checkbox found immediately before the cursor
-        event.preventDefault(); // Stop default backspace
-        nodeBeforeCursor.remove(); // Remove the checkbox
+      // --- If neither case handled it, allow default --- 
+      console.log("ALLOWING DEFAULT: Backspace - No specific handling triggered.");
+      handleTypingState();
 
-        // Update the store
-        setTimeout(() => {
-            const sectionTitle = editor.dataset.title;
-            const currentContent = editor.innerHTML;
-            notes.update(currentNotes =>
-                currentNotes.map(note =>
-                    note.title === sectionTitle ? { ...note, content: currentContent } : note
-                )
-            );
-        }, 0);
-      } else {
-        // No checkbox deletion, handle typing state for normal backspace
-        handleTypingState();
-      }
     } else {
         // Handle typing state for other keys
         handleTypingState();
@@ -521,7 +593,8 @@
   $:
   {
     const hoverColor = hexToRgba(currentThemeColor, 0.16); // Calculate hover color with 16% alpha
-    mainStyle = `--theme-color: ${currentThemeColor}; --theme-color-hover: ${hoverColor};`;
+    const bgColor = hexToRgba(currentThemeColor, 0.03);    // Calculate background color with 3% alpha
+    mainStyle = `--theme-color: ${currentThemeColor}; --theme-color-hover: ${hoverColor}; background-color: ${bgColor};`; // Add background-color
     // Also update selection style whenever theme changes
     updateSelectionStyle(currentThemeColor);
   }
@@ -597,6 +670,15 @@
       }
     }, 3600 * 1000); // Check every hour
 
+    // --- Initial Theme Check --- 
+    // Call checkAndUpdateTheme after the store is potentially populated by localStorageStore
+    // We might need a slight delay or ensure the store is ready
+    // Subscribing once should give us the initial value after potential async loading
+    const unsubscribe = notes.subscribe(initialNotes => {
+      checkAndUpdateTheme(initialNotes);
+    });
+    unsubscribe(); // Unsubscribe immediately after getting the initial value
+
     // Cleanup timer and intervals on unmount
     return () => {
       clearTimeout(typingTimer);
@@ -612,7 +694,7 @@
 </script>
 
 <main 
-  class="flex flex-col items-center min-h-screen w-full pt-8 pb-16 space-y-4" 
+  class="flex flex-col items-center justify-center min-h-screen w-full pt-8 pb-16 space-y-2"
   style={mainStyle}
 >
   <!-- Iterate over the notes array from the store -->
@@ -620,7 +702,7 @@
     <!-- Section -->
     <section class="w-full max-w-lg px-4">
       <!-- Section Title Row -->
-      <h2 class="text-xl font-medium text-gray-500 mb-3 flex items-center space-x-2">
+      <h2 class="text-xl font-medium text-black/80 mb-3 flex items-center space-x-2">
         <span>{note.title}</span>
         <!-- Countdown Pill -->
         {#if /^Q\d$/.test(note.title)}
@@ -669,9 +751,12 @@
 
   <!-- Focus Message Indicator -->
   <div
-    class="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 px-4 py-2 rounded-full shadow-md transition-opacity duration-300 ease-in-out"
+    class="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 px-3 py-2 rounded-full shadow-md 
+           transition-all duration-500 ease-in-out translate-y-full"
     class:opacity-0={!showFocusMessage}
     class:opacity-100={showFocusMessage}
+    class:translate-y-full={!showFocusMessage}
+    class:translate-y-0={showFocusMessage}
     style="background-color: #007AFF; color: white;"
   >
     {focusMessageText}
@@ -704,7 +789,7 @@
   /* Placeholder styling for contenteditable div */
   [contenteditable][placeholder]:empty:before {
     content: attr(placeholder);
-    color: #a0aec0; /* gray-500 */
+    color: rgba(0, 0, 0, 0.44); /* Changed from #a0aec0 (gray-500) to black 44% */
     cursor: text;
     pointer-events: none; 
     display: block; /* Needed for placeholder */
@@ -724,8 +809,8 @@
   /* Countdown Pill Styles */
   .countdown-pill {
     @apply text-xs font-medium px-2 py-0.5 rounded-full inline-block;
-    background-color: #f3f4f6; /* gray-100 */
-    color: #9ca3af; /* Lighter gray-400 */
+    background-color: rgba(0, 0, 0, 0.06); /* Changed from 8% to 6% black */
+    color: rgba(0, 0, 0, 0.32); /* Changed from 24% to 32% black */
     white-space: nowrap; /* Prevent wrapping */
     transition: color 0.3s ease, background-color 0.3s ease;
   }
@@ -761,7 +846,8 @@
     margin-right: 0.1rem; /* Reduced margin even further */
     cursor: pointer;
     display: inline-block;
-    vertical-align: middle; /* Revert for testing jump issue */
+    position: relative; /* Enable relative positioning */
+    top: 1.6px; /* Nudge the checkbox down slightly */
     transition: background-color 0.2s ease; /* Add transition for hover */
   }
 
