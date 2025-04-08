@@ -7,6 +7,14 @@
     font-family: 'Inter Variable', system-ui, sans-serif;
     @apply bg-white h-full w-full m-0 p-0 overflow-x-hidden;
   }
+
+  /* Add media query for mobile devices */
+  @media (max-width: 768px) {
+    html, body {
+      /* Prevent vertical scrolling on smaller screens */
+      @apply overflow-y-hidden;
+    }
+  }
 }
 
 @layer components {
