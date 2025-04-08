@@ -344,18 +344,22 @@
     if (!selection || selection.rangeCount === 0) return;
 
     if (event.key === 'Enter') {
+      console.log('Enter key pressed');
       event.preventDefault(); // Prevent default Enter behavior always
       const range = selection.getRangeAt(0);
       const container = range.startContainer;
 
       let parentElement = container.nodeType === Node.TEXT_NODE ? container.parentNode : container;
+      console.log('Parent element:', parentElement);
 
       // Heuristic: Check if the parent element starts with a checkbox
       const startsWithCheckbox = parentElement.firstChild && 
                                parentElement.firstChild.nodeType === Node.ELEMENT_NODE && 
                                parentElement.firstChild.classList.contains('todo-checkbox');
+      console.log('startsWithCheckbox:', startsWithCheckbox);
 
       if (startsWithCheckbox) {
+          console.log('Condition met: Inserting new checkbox...');
           // Create elements first
           const br = document.createElement('br');
           const checkbox = document.createElement('input');
@@ -383,6 +387,7 @@
           selection.removeAllRanges();
           selection.addRange(finalRange);
 
+          console.log('DOM manipulation complete. Setting store update timeout.');
           // Update store since we modified the DOM directly
           setTimeout(() => {
              const sectionTitle = editor.dataset.title;
@@ -394,6 +399,7 @@
              );
          }, 0);
       } else {
+          console.log('Condition NOT met: Inserting simple line break...');
           // If line does not start with checkbox, just insert a line break
           const br = document.createElement('br');
           range.insertNode(br);
@@ -606,7 +612,7 @@
 </script>
 
 <main 
-  class="flex flex-col items-center justify-center min-h-screen w-full py-16 space-y-6" 
+  class="flex flex-col items-center min-h-screen w-full pt-8 pb-16 space-y-4" 
   style={mainStyle}
 >
   <!-- Iterate over the notes array from the store -->
