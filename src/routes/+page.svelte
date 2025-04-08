@@ -93,8 +93,8 @@
 
   // Define theme colors (using hex codes for easier manipulation)
   const themeColors = [
-    '#ef4444', // Red-500 (Initial)
-    '#3b82f6', // Blue-500
+    '#3b82f6', // Blue-500 (New Default)
+    '#ef4444', // Red-500
     '#22c55e', // Green-500
     '#eab308', // Yellow-500
     '#8b5cf6', // Violet-500
@@ -185,8 +185,11 @@
   let isTyping = false;
   let typingTimer;
 
-  // Reactive variable for the current theme color
-  let currentThemeColor = themeColors[0]; 
+  // --- NEW: Create a separate store for the theme color --- 
+  const themeColorStore = localStorageStore('themeColor', themeColors[0]); // Default to first color (blue)
+
+  // Reactive variable for the current theme color (will be initialized from store in onMount)
+  let currentThemeColor;
 
   // Reactive variable for main element styles
   let mainStyle = '';
@@ -255,7 +258,7 @@
   }
 
   // --- Function to Check Checkbox Counts and Update Theme ---
-  function checkAndUpdateTheme(currentNotes) {
+  function checkAndUpdateTheme(currentNotes, theme) {
     if (!isBrowser) return; // Ensure running in browser
 
     let anySectionHasMoreThanOneCheckbox = false;
@@ -274,22 +277,22 @@
     // Apply theme logic
     if (anySectionHasMoreThanOneCheckbox) {
       // If need to switch to gray and not already gray
-      if (currentThemeColor !== grayThemeColor) {
+      if (theme !== grayThemeColor) {
         console.log("Switching theme to gray");
-        previousThemeColor = currentThemeColor; // Store the current color
-        currentThemeColor = grayThemeColor; // Set to gray (triggers reactive update)
+        previousThemeColor = theme; // Store the current color (from argument)
+        currentThemeColor = grayThemeColor; // Set global reactive variable (triggers store update via $:) 
       }
     } else {
       // If need to switch back from gray
-      if (currentThemeColor === grayThemeColor) {
+      if (theme === grayThemeColor) {
         console.log("Reverting theme from gray");
         if (previousThemeColor) {
-          currentThemeColor = previousThemeColor; // Revert to stored color
+          currentThemeColor = previousThemeColor; // Revert to stored color (triggers store update via $:) 
           previousThemeColor = null; // Clear stored color
         } else {
           // Fallback if previousThemeColor is somehow null (e.g., initial load started gray)
           // Pick the first theme color as a default if reverting from gray without a stored previous color
-          currentThemeColor = themeColors[0]; 
+          currentThemeColor = themeColors[0]; // Use the default blue (triggers store update via $:) 
         }
       }
       // If not gray and no section has > 1 checkbox, do nothing (keep current theme)
@@ -363,7 +366,7 @@
         );
 
         // --- Theme Check Logic (runs after store update) ---
-        checkAndUpdateTheme($notes);
+        checkAndUpdateTheme($notes, currentThemeColor);
         // --- End Theme Check Logic ---
     }, 0);
   }
@@ -430,7 +433,7 @@
                  )
              );
              // Check theme after updating store
-             checkAndUpdateTheme($notes);
+             checkAndUpdateTheme($notes, currentThemeColor);
 
              // --- Focus Message Logic ADDED here ---
              // Count checkboxes in the *current* section after adding one
@@ -472,7 +475,7 @@
                  )
              );
              // Optionally check theme here too for consistency, though unlikely to change
-             // checkAndUpdateTheme($notes); 
+             // checkAndUpdateTheme($notes, currentThemeColor); 
          }, 0);
       }
     } else if (event.key === 'Backspace') {
@@ -522,7 +525,7 @@
                 const sectionTitle = editor.dataset.title;
                 const currentContent = editor.innerHTML;
                 notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: currentContent } : note));
-                checkAndUpdateTheme($notes);
+                checkAndUpdateTheme($notes, currentThemeColor);
             }, 0);
             return; // Handled
           }
@@ -549,7 +552,7 @@
               const sectionTitle = editor.dataset.title;
               const currentContent = editor.innerHTML;
               notes.update(currentNotes => currentNotes.map(note => note.title === sectionTitle ? { ...note, content: currentContent } : note));
-              checkAndUpdateTheme($notes);
+              checkAndUpdateTheme($notes, currentThemeColor);
           }, 0);
           return; // Handled
         }
@@ -599,9 +602,33 @@
     updateSelectionStyle(currentThemeColor);
   }
 
+  // --- NEW: Reactive statement to update theme store whenever currentThemeColor changes --- 
+  $: if (isBrowser && currentThemeColor) { 
+      // Check if the store's current value is different before setting
+      // This prevents potential loops if the store itself triggers an update somehow
+      let currentStoreValue;
+      const unsub = themeColorStore.subscribe(v => currentStoreValue = v)(); // Get current value sync
+      if (currentStoreValue !== currentThemeColor) {
+          themeColorStore.set(currentThemeColor);
+          console.log('Saved theme to localStorage:', currentThemeColor);
+      }
+  }
+
+  // --- Variable to hold theme store unsubscriber --- 
+  let unsubscribeThemeStore = null;
+
   onMount(() => {
     if (!isBrowser) return; // Guard against server-side execution
     
+    // --- Subscribe to theme store to initialize local variable --- 
+    unsubscribeThemeStore = themeColorStore.subscribe(value => {
+      if (value) { // Ensure value is not null/undefined
+        currentThemeColor = value;
+        // Update selection style here explicitly in case $: block hasn't run yet
+        updateSelectionStyle(currentThemeColor);
+      }
+    });
+
     // --- Initial Countdown Calculation (Content rendering handled by template) ---
     function initializeCountdowns() {
       // Calculate initial countdowns
@@ -675,7 +702,16 @@
     // We might need a slight delay or ensure the store is ready
     // Subscribing once should give us the initial value after potential async loading
     const unsubscribe = notes.subscribe(initialNotes => {
-      checkAndUpdateTheme(initialNotes);
+      // --- UPDATED: Pass the theme value obtained from the store subscription --- 
+      // Check if currentThemeColor has been set by the subscription yet
+      if (currentThemeColor) {
+          checkAndUpdateTheme(initialNotes, currentThemeColor);
+      } else {
+          // Fallback or wait, though sync subscription should make this unlikely
+          console.warn("Theme color not set yet during initial notes check");
+          // Optionally use the store's initial value directly as fallback
+          checkAndUpdateTheme(initialNotes, themeColors[0]); 
+      }
     });
     unsubscribe(); // Unsubscribe immediately after getting the initial value
 
@@ -686,6 +722,10 @@
       clearInterval(countdownUpdateInterval);
       clearInterval(longerInterval); // Clear the less frequent interval too
       clearTimeout(focusMessageTimeout); // Clear focus message timeout on unmount
+      // --- Unsubscribe from theme store --- 
+      if (unsubscribeThemeStore) {
+        unsubscribeThemeStore();
+      }
       if (selectionStyleElement && selectionStyleElement.parentNode) {
         selectionStyleElement.parentNode.removeChild(selectionStyleElement);
       }
