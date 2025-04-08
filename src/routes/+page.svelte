@@ -1,11 +1,13 @@
 <script>
-  let lastSavedText = "";
-  let showSaveIndicator = false; // Initialize the indicator visibility state
-  // Replace $app/environment import with direct browser detection
-  const browser = typeof window !== 'undefined';
   import { onMount, tick } from 'svelte';
-  // Import writable from svelte/store
   import { writable } from 'svelte/store';
+
+  // Simple browser detection that works without SvelteKit's $app/environment
+  const isBrowser = typeof window !== 'undefined';
+
+  // Saved indicator state
+  let lastSavedText = "";
+  let showSaveIndicator = false;
 
   // --- Debounce Utility ---
   function debounce(func, wait) {
@@ -22,84 +24,66 @@
   // --- End Debounce Utility ---
 
   // --- LocalStorage Store Helper ---
-  // Creates a Svelte store that automatically saves its value to localStorage
-  // and loads the saved value on initialization.
   function localStorageStore(key, initialValue) {
-    let storedValue = null;
-    // Check if localStorage is available AND we are in the browser
-    if (browser && typeof localStorage !== 'undefined') {
+    // Create writable store with initial value
+    const store = writable(initialValue);
+    
+    // Only run in browser environment
+    if (isBrowser) {
       try {
-        storedValue = localStorage.getItem(key);
-      } catch (e) {
-        console.error(`Error reading localStorage key "${key}":`, e);
-        storedValue = null;
-      }
-    }
-
-    let value = initialValue;
-    if (storedValue !== null) {
-      try {
-        const parsed = JSON.parse(storedValue);
-        // --- Validation for Array Structure ---
-        // Check if it's an array and each item has title (string) and content (string)
-        if (
-          Array.isArray(parsed) &&
-          parsed.every(item => typeof item === 'object' && item !== null &&
-                                typeof item.title === 'string' &&
-                                typeof item.content === 'string')
-        ) {
-          value = parsed;
-        } else {
-          console.warn(`Invalid data format found in localStorage for key "${key}". Expected array of {title: string, content: string}. Resetting to initial value.`);
-          // Keep initialValue if validation fails
-        }
-        // --- End Validation ---
-      } catch (e) {
-        console.error(`Failed to parse localStorage key "${key}":`, e);
-        // If parsing fails, fall back to initial value
-      }
-    }
-
-    // ---> RE-ADD LOGGING <---
-    if (browser) {
-      console.log('Initializing store with value:', JSON.stringify(value)); 
-    }
-    // ---> END LOGGING <---
-
-    const store = writable(value);
-
-    // --- Debounced Save Function ---
-    const saveToLocalStorage = debounce((currentValue) => {
-       if (browser && typeof localStorage !== 'undefined') {
+        // Try to get stored value
+        const storedValue = localStorage.getItem(key);
+        
+        if (storedValue) {
           try {
-             // ---> RE-ADD LOGGING <---
-             console.log('[Save]: Saving to localStorage:', JSON.stringify(currentValue)); 
-             localStorage.setItem(key, JSON.stringify(currentValue));
-             console.log('[Save]: Notes potentially saved.'); // Log success
-             
-             // Show save indicator
-             lastSavedText = new Date().toLocaleTimeString();
-             showSaveIndicator = true;
-             setTimeout(() => {
-               showSaveIndicator = false;
-             }, 2000); // Hide after 2 seconds
+            // Parse and validate stored data
+            const parsedValue = JSON.parse(storedValue);
+            if (Array.isArray(parsedValue) && 
+                parsedValue.every(item => typeof item === 'object' && item !== null &&
+                                typeof item.title === 'string' &&
+                                typeof item.content === 'string')) {
+              // If valid, set store to stored value
+              store.set(parsedValue);
+              console.log(`Loaded data from localStorage: ${key}`, parsedValue);
+            } else {
+              console.warn(`Invalid data in localStorage: ${key}. Using initial value.`);
+            }
           } catch (e) {
-             console.error(`Error writing to localStorage key "${key}":`, e);
+            console.error(`Error parsing localStorage data: ${key}`, e);
           }
-       }
-    }, 750); // Debounce save by 750ms (adjust as needed)
-    // --- End Debounced Save Function ---
-
-    // Only subscribe if in the browser
-    if (browser) {
-       store.subscribe((currentValue) => {
-          saveToLocalStorage(currentValue); // Call the debounced save function
-       });
+        } else {
+          console.log(`No data found in localStorage: ${key}. Using initial value.`);
+        }
+        
+        // Save to localStorage whenever store changes
+        const saveToLocalStorage = debounce((value) => {
+          try {
+            localStorage.setItem(key, JSON.stringify(value));
+            console.log(`Saved to localStorage: ${key}`);
+            
+            // Show save indicator
+            lastSavedText = new Date().toLocaleTimeString();
+            showSaveIndicator = true;
+            setTimeout(() => {
+              showSaveIndicator = false;
+            }, 2000);
+          } catch (e) {
+            console.error(`Error saving to localStorage: ${key}`, e);
+          }
+        }, 500);
+        
+        // Set up subscription
+        const unsubscribe = store.subscribe(saveToLocalStorage);
+        
+        // Clean up on page unload
+        window.addEventListener('unload', unsubscribe);
+      } catch (e) {
+        console.error('Error accessing localStorage', e);
+      }
     }
-
+    
     return store;
   }
-  // --- End LocalStorage Store Helper ---
 
   // Define theme colors (using hex codes for easier manipulation)
   const themeColors = [
@@ -189,19 +173,22 @@
   ];
 
   // Create the notes store using the localStorage helper
-  // Key: 'notesArrayData', Initial State: initialNotesState
-  const notes = localStorageStore('notesArrayData', initialNotesState);
+  const notes = localStorageStore('notesAppData', initialNotesState);
   // --- End Initialize Notes Store ---
 
-  // Removed: let noteContent = ''; (replaced by notes object)
-  // Removed: let editorElement; (will use event.target)
   let isTyping = false;
   let typingTimer;
 
   // Reactive variable for the current theme color
   let currentThemeColor = themeColors[0]; 
 
+  // Reactive variable for main element styles
+  let mainStyle = '';
+
   // Reactive variables for countdowns
+  let focusMessageText = '';
+  let showFocusMessage = false;
+  let focusMessageTimeout = null;
   let quarterCountdown = '';
   let weekCountdown = '';
   let dayCountdown = ''; 
@@ -224,7 +211,7 @@
   // Function to update the ::selection style globally
   let selectionStyleElement = null;
   function updateSelectionStyle(color) {
-    if (!browser) return; // Only run in browser
+    if (!isBrowser) return; // Only run in browser
     
     const rgbaColor = hexToRgba(color, 0.3); // Use 30% opacity for selection
     if (!selectionStyleElement) {
@@ -261,149 +248,319 @@
     }
   }
 
-  // Function to handle input and check for [] pattern - MODIFIED for Array Store
-  async function handleInput(event) {
-    // Ensure input is coming from one of our editor divs
+  // Function to handle input and check for [] pattern
+  function handleInput(event) {
     if (!event.target.matches('.editor-area')) return;
 
     handleTypingState();
-
-    const title = event.target.dataset.title;
-    const editorDiv = event.target; // Keep reference to the editor
-    let contentChangedByCheckbox = false; // Flag
-
-    // --- Try Checkbox Logic First ---
-    await tick(); // Allow DOM to potentially update
+    const editor = event.target;
+    const sectionTitle = editor.dataset.title;
     const selection = window.getSelection();
-    if (selection && selection.rangeCount > 0) {
-      const range = selection.getRangeAt(0);
-      const node = range.startContainer;
-      const offset = range.startOffset;
+    const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
 
-      if (node.nodeType === Node.TEXT_NODE) {
-        const text = node.textContent || '';
-        const textBeforeCursor = text.slice(0, offset);
+    let replaced = false; // Flag to check if we replaced []
 
-        // Check for '[] ' pattern
-        if (textBeforeCursor.endsWith('[] ') && (textBeforeCursor.length === 3 || node?.previousSibling?.nodeName === 'BR' || node?.parentNode === editorDiv)) {
-          const textBeforePattern = textBeforeCursor.slice(0, -3);
-          const textAfterCursor = text.slice(offset);
+    // Check if the input likely resulted in "[]" just before the caret
+    if (range && range.collapsed) {
+        const node = range.startContainer;
+        const offset = range.startOffset;
 
-          try {
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.className = 'todo-checkbox mr-1 align-middle'; // Added styling
+        // Ensure we are in a text node and there's enough text before the caret
+        if (node.nodeType === Node.TEXT_NODE && offset >= 2) {
+            if (node.textContent.substring(offset - 2, offset) === '[]') {
+                // Create the checkbox element
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.className = 'todo-checkbox';
+                checkbox.contentEditable = 'false'; // Prevent editing the checkbox itself
 
-            const beforeNode = document.createTextNode(textBeforePattern);
-            const afterNode = document.createTextNode('\u00A0' + textAfterCursor); // Add non-breaking space
+                // Create a non-breaking space node to go after the checkbox
+                const spaceNode = document.createTextNode('\u00A0'); // &nbsp;
 
-            const parent = node.parentNode;
-            if (parent && node && parent === editorDiv) { 
-                parent.replaceChild(afterNode, node);
-                parent.insertBefore(checkbox, afterNode);
-                parent.insertBefore(beforeNode, checkbox);
+                // Create a range covering the "[]" text
+                const replaceRange = document.createRange();
+                replaceRange.setStart(node, offset - 2); // Start before '['
+                replaceRange.setEnd(node, offset);       // End after ']'
 
-                // --- Update Store Immediately After Checkbox DOM Change ---
-                const updatedHtmlAfterCheckbox = editorDiv.innerHTML;
-                notes.update(currentNotes =>
-                  currentNotes.map(note =>
-                    note.title === title ? { ...note, content: updatedHtmlAfterCheckbox } : note
-                  )
-                );
-                console.log('[Checkbox]: Updated store after checkbox insert.');
-                contentChangedByCheckbox = true;
-                // --- End Store Update ---
+                // Delete the "[]" text
+                replaceRange.deleteContents();
 
-                // --- Restore Cursor Position ---
-                await tick(); 
-                range.setStart(afterNode, 1); 
-                range.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(range);
-                // --- End Cursor Restore ---
+                // Insert the checkbox and then the space node at the caret position
+                // Insert space first, then checkbox before it. This places checkbox then space.
+                replaceRange.insertNode(spaceNode);
+                replaceRange.insertNode(checkbox);
+
+                // Set the caret position *after* the inserted space node
+                // Need to get a new range instance after modification
+                const newRange = document.createRange();
+                newRange.setStartAfter(spaceNode);
+                newRange.collapse(true);
+                selection.removeAllRanges(); // Clear previous selection
+                selection.addRange(newRange);   // Set the new cursor position
+
+                replaced = true; // Mark that we performed the replacement
+                event.preventDefault(); // Prevent potential default actions
             }
-          } catch (error) {
-            console.error('[Checkbox Error]: Failed during DOM manipulation or cursor setting:', error);
-            // Optionally try to recover or just prevent crash
-          }
-        }
-      }
-    }
-    // --- End Checkbox Logic ---
-
-    // --- Standard Update (if checkbox didn't change content) ---
-    if (!contentChangedByCheckbox) {
-        const newContent = editorDiv.innerHTML; // Get potentially changed content
-
-        // Check if content actually changed before updating store
-        let currentContent = '';
-        const unsubscribe = notes.subscribe(currentNotes => {
-            const note = currentNotes.find(n => n.title === title);
-            currentContent = note ? note.content : '';
-        });
-        unsubscribe(); // Immediately unsubscribe
-
-        if (newContent !== currentContent) {
-            // console.log('handleInput: Standard update needed.')
-            notes.update(currentNotes => {
-                // console.log('[Update]: Store update starting. Input Notes:', JSON.stringify(currentNotes));
-                const updatedNotes = currentNotes.map(note => {
-                if (note.title === title) {
-                    // console.log(`[Update]: Mapping: Found target note "${title}", updating content.`);
-                    return { ...note, content: newContent };
-                } else {
-                    return note;
-                }
-                });
-                // console.log('[Update]: Store update finished. Output Notes:', JSON.stringify(updatedNotes));
-                return updatedNotes;
-            });
         }
     }
-    // --- End Standard Update ---
+
+    // Update the store *after* DOM manipulation (use timeout for safety)
+    // This ensures the store reflects the latest state after our direct change
+    // The timeout allows the browser to process the DOM changes before we read innerHTML
+    setTimeout(() => {
+        const currentContent = editor.innerHTML;
+        notes.update(currentNotes =>
+            currentNotes.map(note =>
+                note.title === sectionTitle ? { ...note, content: currentContent } : note
+            )
+        );
+
+        // --- Focus Message Logic --- 
+        // Count checkboxes in the current section's updated content
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = currentContent;
+        const checkboxCount = tempDiv.querySelectorAll('.todo-checkbox').length;
+
+        // Show message if more than one checkbox
+        if (checkboxCount > 1) {
+            focusMessageText = "focus on one goal that matters";
+            showFocusMessage = true;
+            // Clear previous hide timeout if it exists
+            clearTimeout(focusMessageTimeout);
+            // Set new timeout to hide the message
+            focusMessageTimeout = setTimeout(() => {
+                showFocusMessage = false;
+            }, 4000); // Hide after 4 seconds
+        }
+        // --- End Focus Message Logic ---
+    }, 0);
   }
   // --- End handleInput ---
 
-  // Function to handle keydown and check for [] pattern - MODIFIED for Array Store
+  // --- handleKeydown (handles Enter and Backspace for checkboxes) ---
   function handleKeydown(event) {
-    // Ensure input is coming from one of our editor divs
-    if (!event.target.matches('.editor-area')) return;
+    const editor = event.target;
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return;
 
-    handleTypingState();
+    if (event.key === 'Enter') {
+      event.preventDefault(); // Prevent default Enter behavior always
+      const range = selection.getRangeAt(0);
+      const container = range.startContainer;
+
+      let parentElement = container.nodeType === Node.TEXT_NODE ? container.parentNode : container;
+
+      // Heuristic: Check if the parent element starts with a checkbox
+      const startsWithCheckbox = parentElement.firstChild && 
+                               parentElement.firstChild.nodeType === Node.ELEMENT_NODE && 
+                               parentElement.firstChild.classList.contains('todo-checkbox');
+
+      if (startsWithCheckbox) {
+          // Create elements first
+          const br = document.createElement('br');
+          const checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.className = 'todo-checkbox';
+          checkbox.contentEditable = 'false';
+          const spaceNode = document.createTextNode('\u00A0'); // &nbsp;
+
+          // Insert elements sequentially, adjusting range each time
+          range.insertNode(br);
+          range.setStartAfter(br);
+          range.collapse(true);
+
+          range.insertNode(checkbox);
+          range.setStartAfter(checkbox);
+          range.collapse(true);
+
+          range.insertNode(spaceNode);
+
+          // Set final cursor position explicitly after the last node
+          const finalRange = document.createRange();
+          finalRange.setStartAfter(spaceNode);
+          finalRange.collapse(true);
+
+          selection.removeAllRanges();
+          selection.addRange(finalRange);
+
+          // Update store since we modified the DOM directly
+          setTimeout(() => {
+             const sectionTitle = editor.dataset.title;
+             const currentContent = editor.innerHTML;
+             notes.update(currentNotes =>
+                 currentNotes.map(note =>
+                     note.title === sectionTitle ? { ...note, content: currentContent } : note
+                 )
+             );
+         }, 0);
+      } else {
+          // If line does not start with checkbox, just insert a line break
+          const br = document.createElement('br');
+          range.insertNode(br);
+          range.setStartAfter(br);
+          range.collapse(true); // Collapse cursor to after the inserted <br>
+
+          selection.removeAllRanges();
+          selection.addRange(range);
+
+          // Update store immediately
+          setTimeout(() => {
+             const sectionTitle = editor.dataset.title;
+             const currentContent = editor.innerHTML;
+             notes.update(currentNotes =>
+                 currentNotes.map(note =>
+                     note.title === sectionTitle ? { ...note, content: currentContent } : note
+                 )
+             );
+         }, 0);
+      }
+    } else if (event.key === 'Backspace') {
+      if (!selection.isCollapsed) {
+        handleTypingState(); // Allow default for selection delete
+        return; 
+      }
+
+      const range = selection.getRangeAt(0);
+      const container = range.startContainer;
+      const offset = range.startOffset;
+
+      // Check if we are at the very beginning of the editor content
+      if ((container === editor || editor.contains(container)) && offset === 0 && !container.previousSibling) {
+         // More robust check: check if caret is effectively at pos 0 of editor
+         const tempRange = document.createRange();
+         tempRange.selectNodeContents(editor);
+         tempRange.setEnd(container, offset);
+         if (tempRange.toString() === '') {
+            handleTypingState(); // At very start, nothing to delete before
+            return; 
+         }
+      }
+        
+      let nodeBeforeCursor = null;
+      try {
+         if (offset > 0) {
+            // If offset > 0, check the node within the same container at offset - 1
+            if (container.nodeType === Node.ELEMENT_NODE) {
+                const potentialCheckbox = container.childNodes[offset - 1];
+                if (potentialCheckbox && potentialCheckbox.nodeType === Node.ELEMENT_NODE && potentialCheckbox.classList.contains('todo-checkbox')) {
+                    nodeBeforeCursor = potentialCheckbox;
+                }
+            }
+            // If text node, default backspace handles char delete
+        } else { // offset === 0, cursor is at the beginning of container
+            // Look at the node logically before the container
+            let previousNode = container.previousSibling;
+            // Skip insignificant whitespace nodes if necessary (though less common with our structure)
+            while (previousNode && previousNode.nodeType === Node.TEXT_NODE && !previousNode.textContent.trim()) {
+               previousNode = previousNode.previousSibling;
+            }
+            if (previousNode && previousNode.nodeType === Node.ELEMENT_NODE && previousNode.classList.contains('todo-checkbox')) {
+                nodeBeforeCursor = previousNode;
+            }
+        }
+      } catch (e) {
+         console.warn("Error checking node before cursor for backspace:", e);
+      }
+
+      if (nodeBeforeCursor) {
+        // Checkbox found immediately before the cursor
+        event.preventDefault(); // Stop default backspace
+        nodeBeforeCursor.remove(); // Remove the checkbox
+
+        // Update the store
+        setTimeout(() => {
+            const sectionTitle = editor.dataset.title;
+            const currentContent = editor.innerHTML;
+            notes.update(currentNotes =>
+                currentNotes.map(note =>
+                    note.title === sectionTitle ? { ...note, content: currentContent } : note
+                )
+            );
+        }, 0);
+      } else {
+        // No checkbox deletion, handle typing state for normal backspace
+        handleTypingState();
+      }
+    } else {
+        // Handle typing state for other keys
+        handleTypingState();
+    }
   }
+  // --- End handleKeydown ---
 
-  // No need for add/delete functions for a single note
-  // function addNote() { ... }
-  // function deleteNote() { ... }
-  
-  onMount(() => {
-    if (!browser) return; // Guard against server-side execution
-    
-    updateSelectionStyle(currentThemeColor); 
-
-    // --- Initial Countdown Calculation ---
-    function updateCountdowns() {
-        const now = new Date().getTime(); // Current time in milliseconds
-
-        // Quarter
-        const endOfQuarterMillis = getEndOfQuarter(currentYear, currentQuarterNumber);
-        quarterCountdown = formatTimeDifferenceDays(endOfQuarterMillis - now);
-
-        // Week
-        const endOfWeekMillis = getEndOfWeek().getTime();
-        weekCountdown = formatTimeDifferenceDays(endOfWeekMillis - now);
-
-        // Day - Use new HMS formatter
-        const endOfDayMillis = getEndOfDay().getTime();
-        dayCountdown = formatTimeDifferenceHMS(endOfDayMillis - now); // Use HMS format
+  // Svelte action to initialize the contenteditable element and handle updates safely
+  function initContent(node, content) {
+    // Set the initial content only if it's different
+    // This check prevents unnecessary overwrites and potential flicker on load
+    if (node.innerHTML !== content) {
+        node.innerHTML = content;
     }
 
-    updateCountdowns(); // Initial call
-    // Interval to update countdowns frequently - Changed to 1 second
-    const countdownUpdateInterval = setInterval(updateCountdowns, 1000); // Update every second
+    return {
+      update(newContent) {
+        // Only update the innerHTML if the element is NOT focused
+        // AND if the content has actually changed.
+        // This prevents the action from interfering with user typing and direct DOM manipulation.
+        if (document.activeElement !== node && node.innerHTML !== newContent) {
+            node.innerHTML = newContent;
+            // Optional: log when the action updates content
+            // console.log("initContent action updated non-focused editor:", node.dataset.title);
+        }
+      }
+      // No destroy needed currently
+    };
+  }
 
+  // Reactive statement to update mainStyle whenever currentThemeColor changes
+  $:
+  {
+    const hoverColor = hexToRgba(currentThemeColor, 0.16); // Calculate hover color with 16% alpha
+    mainStyle = `--theme-color: ${currentThemeColor}; --theme-color-hover: ${hoverColor};`;
+    // Also update selection style whenever theme changes
+    updateSelectionStyle(currentThemeColor);
+  }
 
-    // --- Quarter Change Check (Modified for Array Store) ---
+  onMount(() => {
+    if (!isBrowser) return; // Guard against server-side execution
+    
+    // --- Initial Countdown Calculation (Content rendering handled by template) ---
+    function initializeCountdowns() {
+      // Calculate initial countdowns
+      const now = new Date().getTime(); // Current time in milliseconds
+
+      // Quarter
+      const endOfQuarterMillis = getEndOfQuarter(currentYear, currentQuarterNumber);
+      quarterCountdown = formatTimeDifferenceDays(endOfQuarterMillis - now);
+
+      // Week
+      const endOfWeekMillis = getEndOfWeek().getTime();
+      weekCountdown = formatTimeDifferenceDays(endOfWeekMillis - now);
+
+      // Day - Use new HMS formatter
+      const endOfDayMillis = getEndOfDay().getTime();
+      dayCountdown = formatTimeDifferenceHMS(endOfDayMillis - now); // Use HMS format
+    }
+
+    // Initial call for countdowns
+    initializeCountdowns();
+
+    // Interval to update countdowns frequently
+    const countdownUpdateInterval = setInterval(() => {
+      const now = new Date().getTime();
+      const endOfDayMillis = getEndOfDay().getTime();
+      dayCountdown = formatTimeDifferenceHMS(endOfDayMillis - now); // Only update day frequently
+    }, 1000); // Update every second
+
+    // Interval to update week/quarter less frequently (e.g., every minute)
+    const longerInterval = setInterval(() => {
+      const now = new Date().getTime();
+      const endOfQuarterMillis = getEndOfQuarter(currentYear, currentQuarterNumber);
+      quarterCountdown = formatTimeDifferenceDays(endOfQuarterMillis - now);
+      const endOfWeekMillis = getEndOfWeek().getTime();
+      weekCountdown = formatTimeDifferenceDays(endOfWeekMillis - now);
+    }, 60000); // Update every minute
+
+    // --- Quarter Change Check ---
     const quarterCheckInterval = setInterval(() => {
       const now = new Date();
       const newQuarterNumber = getCurrentQuarter();
@@ -412,62 +569,35 @@
 
       // Use $notes to read the current store value
       const currentNotesValue = $notes;
-      // Find the index of the note that likely holds the old quarter data
-      // We assume it's the first one based on initialNotesState structure
-      // More robustly check if the title starts with 'Q' followed by a digit.
+      // Find the note that likely holds the quarter data (with title starting with 'Q')
       const quarterNoteIndex = currentNotesValue.findIndex(note => /^Q\d$/.test(note.title));
 
-
       if (quarterNoteIndex !== -1) {
-          const oldQuarterTitle = currentNotesValue[quarterNoteIndex].title;
+        const oldQuarterTitle = currentNotesValue[quarterNoteIndex].title;
 
-          if (newQuarterKey !== oldQuarterTitle) {
-              console.log(`Quarter changed! Old: ${oldQuarterTitle}, New: ${newQuarterKey}`);
-              // Update the store: find the note by old title and change its title property
-              notes.update(currentNotes =>
-                  currentNotes.map(note =>
-                      note.title === oldQuarterTitle ? { ...note, title: newQuarterKey } : note
-                  )
-              );
-              // Recalculate countdowns as the quarter key (used for display) has changed
-              // Also update the global currentQuarterKey variable used for comparisons
-              // currentQuarterKey = newQuarterKey; // This line might cause issues if currentQuarterKey is needed elsewhere unchanged until next mount. Let's rely on the title comparison in the loop.
-              updateCountdowns();
-          }
+        if (newQuarterKey !== oldQuarterTitle) {
+          console.log(`Quarter changed! Old: ${oldQuarterTitle}, New: ${newQuarterKey}`);
+          // Update the store: find the note by old title and change its title property
+          notes.update(currentNotes =>
+            currentNotes.map(note =>
+              note.title === oldQuarterTitle ? { ...note, title: newQuarterKey } : note
+            )
+          );
+          // Recalculate countdowns
+          initializeCountdowns(); // Re-init countdowns only
+        }
       } else {
-          console.warn("Could not find the Quarter note object in the store to check for updates.");
-          // If the Quarter note is missing, we could potentially add it back here.
-          // For now, just log a warning.
-          // Example: notes.update(n => [{ title: newQuarterKey, content: '' }, ...n.filter(note => !/^Q\d$/.test(note.title))]);
+        console.warn("Could not find the Quarter note object in the store to check for updates.");
       }
     }, 3600 * 1000); // Check every hour
-    // --- End Quarter Change Check ---
-
-    // --- Set Initial Editor Content --- 
-    // Add a short delay to ensure the editors are in the DOM
-    setTimeout(() => {
-      console.log('onMount: Setting initial editor content...');
-      $notes.forEach(note => {
-        const editorDiv = document.querySelector(`.editor-area[data-title="${note.title}"]`);
-        if (editorDiv) {
-          console.log(`Found editor for "${note.title}". Setting content.`);
-          // Only set if different to avoid potential cursor jumps/issues
-          if (editorDiv.innerHTML !== note.content) { 
-             editorDiv.innerHTML = note.content;
-             console.log(`[onMount]: Set innerHTML for "${note.title}".`);
-          }
-        } else {
-          console.warn(`onMount: Could not find editor div for note titled "${note.title}"`);
-        }
-      });
-    }, 0);
-    // --- End Set Initial Editor Content ---
 
     // Cleanup timer and intervals on unmount
     return () => {
       clearTimeout(typingTimer);
       clearInterval(quarterCheckInterval); 
-      clearInterval(countdownUpdateInterval); // Clear the countdown interval
+      clearInterval(countdownUpdateInterval);
+      clearInterval(longerInterval); // Clear the less frequent interval too
+      clearTimeout(focusMessageTimeout); // Clear focus message timeout on unmount
       if (selectionStyleElement && selectionStyleElement.parentNode) {
         selectionStyleElement.parentNode.removeChild(selectionStyleElement);
       }
@@ -475,26 +605,21 @@
   });
 </script>
 
-<!-- Main container -->
-<!-- Use $notes to access the store's value in the template -->
-<main
-  class="flex flex-col items-center justify-start min-h-screen w-full py-16 space-y-12"
-  style="--theme-color: {currentThemeColor};"
-  on:input={handleInput}
-  on:click={handleEditorClick}
-  on:keydown={handleKeydown}
+<main 
+  role="main"
+  class="flex flex-col items-center justify-center min-h-screen w-full py-16 space-y-6" 
+  style={mainStyle}
+  on:click={handleEditorClick} 
 >
   <!-- Iterate over the notes array from the store -->
-  <!-- Use note.title as the key for {#each} for proper reactivity -->
   {#each $notes as note (note.title)}
-    <!-- Section: Added px-4 -->
-    <section class="w-full max-w-2xl px-4">
-      <!-- Section Title Row: Use items-center for vertical alignment -->
-      <h2 class="text-xl font-semibold text-gray-500 mb-3 flex items-center space-x-2">
-        <!-- Display note.title -->
-        <span>{note.title}</span> <!-- Wrap key in span for spacing -->
-        <!-- Countdown Pill Logic based on note.title -->
-        {#if /^Q\d$/.test(note.title)} <!-- Check if title matches Quarter format (e.g., Q1, Q2) -->
+    <!-- Section -->
+    <section class="w-full max-w-lg px-4">
+      <!-- Section Title Row -->
+      <h2 class="text-xl font-medium text-gray-500 mb-3 flex items-center space-x-2">
+        <span>{note.title}</span>
+        <!-- Countdown Pill -->
+        {#if /^Q\d$/.test(note.title)}
           <span class="countdown-pill">
               {quarterCountdown}
           </span>
@@ -508,90 +633,104 @@
           </span>
         {/if}
       </h2>
-
+      
       <!-- ContentEditable Editor Area -->
-      <!-- The contenteditable div below displays the note content -->
-      <!-- It uses note.content for initial display and note.title to identify which note to update -->
+      <!-- Bind the innerHTML to the store content -->
+      <!-- NOTE: Using @html directive for initial render to handle saved HTML -->
       <div
         contenteditable="true"
         data-title={note.title}
         class="flex-grow focus:outline-none text-gray-800 editor-area"
         class:typing={isTyping}
         placeholder="Start writing or type [] for a to-do..."
-      >{@html note.content}</div>
+        style="line-height: 1.6;"
+        use:initContent={note.content}
+        on:input={handleInput} 
+        on:keydown={handleKeydown}
+      ></div>
     </section>
   {/each}
+
+  <!-- Save Indicator -->
   <div
-    class="absolute bottom-4 right-4 text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded-full shadow-sm transition-opacity duration-300 text-right"
+    class="fixed bottom-4 right-4 text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded-full shadow-sm transition-opacity duration-300"
     class:opacity-0={!showSaveIndicator}
     class:opacity-100={showSaveIndicator}
   >
-    Saved {lastSavedText}
+    Saved at {lastSavedText}
+  </div>
+
+  <!-- Focus Message Indicator -->
+  <div
+    class="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 px-4 py-2 rounded-full shadow-md transition-opacity duration-300 ease-in-out"
+    class:opacity-0={!showFocusMessage}
+    class:opacity-100={showFocusMessage}
+    style="background-color: #007AFF; color: white;"
+  >
+    {focusMessageText}
   </div>
 </main>
 
 <style>
-  /* REMOVE or COMMENT OUT the static Red selection highlight */
-  /* :global(*::selection) {
-    @apply bg-red-500/20; 
-  } */
-
   /* Style the contenteditable div like a textarea */
   .editor-area {
-    font-size: 1.1rem;
+    font-size: 1.1rem; 
     white-space: pre-wrap; /* Preserve whitespace and wrap lines */
     word-wrap: break-word; /* Break long words */
-    min-height: 80px; /* Slightly smaller min-height per section */
-    /* Use CSS variable for caret color */
-    caret-color: var(--theme-color);
-    /* caret-width: thick; */ /* Thicker cursor - removed as blink animation handles caret visibility */
-    border: 1px dashed transparent; /* Add transparent border for layout stability */
+    min-height: 80px; /* Min-height per section */
+    caret-color: var(--theme-color); 
+    border: 1px solid transparent; /* Add border for layout stability during focus */
   }
 
-  .editor-area:not(.typing) {
+  /* Add focus style - Temporarily commented out for debugging */
+  /* .editor-area:focus {
+      border-color: #cbd5e1; 
+      outline: none; 
+  } */
+
+  /* Temporarily comment out blink animation */
+  /* .editor-area:not(.typing) {
     animation: blink 0.75s step-end infinite;
     -webkit-animation: blink 0.75s step-end infinite;
-  }
+  } */
 
   /* Placeholder styling for contenteditable div */
   [contenteditable][placeholder]:empty:before {
     content: attr(placeholder);
     color: #a0aec0; /* gray-500 */
     cursor: text;
-    /* Ensure placeholder doesn't prevent clicking */
-    pointer-events: none;
+    pointer-events: none; 
     display: block; /* Needed for placeholder */
   }
 
-  @keyframes blink {
+  /* Temporarily comment out blink animation keyframes */
+  /* @keyframes blink {
     0%, 100% { caret-color: transparent; }
     50% { caret-color: var(--theme-color); }
-  }
+  } */
 
-  @-webkit-keyframes blink {
+  /* @-webkit-keyframes blink {
     0%, 100% { caret-color: transparent; }
     50% { caret-color: var(--theme-color); }
-  }
+  } */
 
   /* Countdown Pill Styles */
   .countdown-pill {
-    @apply text-xs font-medium px-2 py-0.5 rounded-full inline-block; /* Ensure inline-block */
+    @apply text-xs font-medium px-2 py-0.5 rounded-full inline-block;
     background-color: #f3f4f6; /* gray-100 */
     color: #9ca3af; /* Lighter gray-400 */
     white-space: nowrap; /* Prevent wrapping */
-    transition: color 0.3s ease, background-color 0.3s ease; /* Smooth transitions */
+    transition: color 0.3s ease, background-color 0.3s ease;
   }
 
   /* Specific class for the Today countdown animation & fixed width */
   .today-countdown {
       animation: pulse 2s infinite ease-in-out;
-      width: 8em; /* Increased fixed width - adjust as needed */
-      text-align: center; /* Center text within the fixed width */
-      /* Override horizontal padding from base class */
-      padding-left: 0.5rem; /* Equivalent to px-1 */
-      padding-right: 0.5rem; /* Equivalent to px-1 */
+      min-width: 5em; /* Use min-width */
+      text-align: center;
+      padding-left: 0.5rem;
+      padding-right: 0.5rem;
   }
-
 
   /* Subtle Pulse animation for Today countdown */
   @keyframes pulse {
@@ -603,30 +742,31 @@
     }
   }
 
-  /* Custom styles for the To-Do Checkbox using CSS variable */
-  /* Use :global() to apply styles inside contenteditable */
+  /* Custom styles for the To-Do Checkbox */
   :global(.todo-checkbox) {
     appearance: none;
     -webkit-appearance: none;
-    background-color: transparent;
-
-    @apply w-4 h-4;
-    /* Use CSS variable for border color */
-    border: 2px solid var(--theme-color);
-    @apply rounded mr-1.5 cursor-pointer inline-block;
-
-    vertical-align: text-bottom; /* Align better with text */
-    /* Adjust position slightly if needed */
-    transform: translateY(-1px);
+    background-color: transparent; 
+    width: 1rem;
+    height: 1rem;
+    border: 2px solid var(--theme-color); 
+    border-radius: 0.25rem;
+    margin-right: 0.1rem; /* Reduced margin even further */
+    cursor: pointer;
+    display: inline-block;
+    vertical-align: middle; /* Revert for testing jump issue */
+    transition: background-color 0.2s ease; /* Add transition for hover */
   }
 
-  /* Style for the checked state using CSS variable */
+  /* Style for hover state (only when NOT checked) */
+  :global(.todo-checkbox:not(:checked):hover) {
+    background-color: var(--theme-color-hover); /* Use the hover variable */
+  }
+
+  /* Style for the checked state */
   :global(.todo-checkbox:checked) {
-    /* Use CSS variable for background and border */
     background-color: var(--theme-color); 
     border-color: var(--theme-color); 
-    
-    /* Checkmark SVG remains white - ensure chosen colors contrast well */
     background-image: url("data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3e%3cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3e%3c/svg%3e");
     background-size: 100% 100%;
     background-position: center;
