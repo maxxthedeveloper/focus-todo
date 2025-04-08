@@ -606,10 +606,8 @@
 </script>
 
 <main 
-  role="main"
   class="flex flex-col items-center justify-center min-h-screen w-full py-16 space-y-6" 
   style={mainStyle}
-  on:click={handleEditorClick} 
 >
   <!-- Iterate over the notes array from the store -->
   {#each $notes as note (note.title)}
@@ -639,6 +637,8 @@
       <!-- NOTE: Using @html directive for initial render to handle saved HTML -->
       <div
         contenteditable="true"
+        role="textbox"
+        aria-multiline="true"
         data-title={note.title}
         class="flex-grow focus:outline-none text-gray-800 editor-area"
         class:typing={isTyping}
@@ -647,6 +647,7 @@
         use:initContent={note.content}
         on:input={handleInput} 
         on:keydown={handleKeydown}
+        on:click={handleEditorClick}
       ></div>
     </section>
   {/each}
